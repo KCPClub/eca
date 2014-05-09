@@ -1,0 +1,4 @@
+*pyc
+*swp
+mnist.pkl.gz
+.gitignore

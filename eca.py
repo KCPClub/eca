@@ -1,35 +1,7 @@
 import numpy as np
 import time as t
-
+from utils import rearrange_for_plot
 DEBUG_INFO = False
-
-
-def rearrange_for_plot(w):
-    """
-    Helper for tiling 1-dimensional square vectors into an array of images
-    """
-    ratio = 2/1
-    image_dim = np.sqrt(w.shape[0])
-    if image_dim - np.floor(image_dim) > 0.001:
-        print 'Chosen weights probably not representing a square image'
-        return w
-    image_dim = int(image_dim)
-    l = np.int(np.sqrt(w.shape[1] * ratio)) + 1
-    h = np.max([l / ratio, 2])
-    #print l, h
-    w_ = w.T.reshape(w.shape[1], image_dim, image_dim)
-    # TODO: A mess. Fix and clean up. Currently loses plots of some neurons!
-
-    rows = np.vstack([np.hstack(w_[l * i:l * (i + 1), :, :]) for i in
-                      range(h-1)])
-    #print np.array(rows.shape) / 28
-    if l * (h) < w_.shape[0] - 1:
-        last_row = np.hstack(w_[l * (h - 1):, :, :])
-        last_row = np.hstack((last_row, np.zeros((last_row.shape[0],
-                                                  rows.shape[1] -
-                                                  last_row.shape[1]))))
-        rows = np.vstack((rows, last_row))
-    return rows
 
 
 def lerp(t, old, new):
