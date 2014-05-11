@@ -104,7 +104,7 @@ class Model(object):
 
         return (d1, d2)
 
-    def update_state(self, state_index, input, tau):
+    def update_state(self, state_index, input, tau, missing_values=None):
         x = self.X[state_index]
         assert input is None or x.k == input.shape[1], "Sample size mismatch"
 
@@ -117,21 +117,26 @@ class Model(object):
         # Feedforward originates from previous layer's state or given input
         if input is None:
             assert not self.identity
-            input = self.parent.X[state_index].value
+            feedforward = np.dot(self.phi.T, self.parent.X[state_index].value)
             origin = self.parent.name
         else:
             origin = 'system input (%d dim)' % input.shape[0]
+            feedforward = input
 
         #self.info('Updating state[%d]: feedfwd from %s and feedback from %s' %
                   #(state_index, origin, self.child.name if self.child else "nowhere"))
 
-        feedforward = np.dot(self.phi.T, input)
 
         # Apply nonlinearity to feedforward path only
         if self.nonlin:
             feedforward = self.nonlin(feedforward)
 
         new_value = feedforward - feedback
+
+        # If predicting missing values, force them to zero in residual so that
+        # they don't influence learning
+        if missing_values is not None and input is not None:
+            new_value[missing_values] = 0.
 
         # Or if we want to apply nonlinearity to the result
         #if self.nonlin:
@@ -140,7 +145,7 @@ class Model(object):
         (x.value, d) = lerp(tau, x.value, new_value)
         return d
 
-    def get_feedback(self, state_index, parent):
+    def get_feedback(self, state_index, parent=None):
         return np.dot(self.phi, self.X[state_index].value)
 
     def info(self, str):
@@ -197,7 +202,8 @@ class CCAModel(Model):
         self.E_XU = None
         return np.max((np.abs(di), np.average(np.abs(dz))))
 
-    def get_feedback(self, state_index, parent):
+    def get_feedback(self, state_index, parent=None):
+        assert parent is not None, 'CCA needs parent'
         assert len(self.parent) == 2, 'CCA should have exactly 2 parents'
         # XXX: Uncomment the following to avoid signal propagation
         # back from CCA layer
@@ -292,7 +298,7 @@ class ECA(object):
         self.cca.connect_parent(self.layers[-2])
         self.cca.connect_parent(last_of_u_branch)
 
-    def update(self, u, y, tau):
+    def update(self, u, y, tau, missing=None):
         """
         Performs update round-trip from u to X and back.
         """
@@ -301,21 +307,21 @@ class ECA(object):
             for l in self.layers:
                 l.create_state(u.shape[1])
 
-        self.update_states(0, u, y, tau)
+        self.update_states(0, u, y, tau, missing)
         self.update_models(0, tau)
 
     def update_models(self, i, tau):
         for l in self.layers:
             l.update_model(i, tau)
 
-    def update_states(self, i, u, y, tau):
+    def update_states(self, i, u, y, tau, missing=None):
         max_diff = -1e100
 
         # Loop over net inputs
         for (x, val) in zip([self.l_U, self.l_Y], [u, y]):
             # Loop through the chain of layers
             while x:
-                d = x.update_state(i, val, tau)
+                d = x.update_state(i, val, tau, missing)
                 x = x.child
                 val = None  # Only the first layer will have value in
 
@@ -379,6 +385,9 @@ class ECA(object):
         while l.child and not isinstance(l.child, CCAModel):
             l = l.child
         return l.X[i].value
+
+    def uest(self):
+        return self.l_U.child.get_feedback(0)
 
     def phi_im(self, index):
         # index is omitted for now, and the lowest layer is plotted
