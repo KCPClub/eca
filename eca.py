@@ -1,6 +1,9 @@
 import numpy as np
 import time as t
+import theano
+import theano.tensor as T
 DEBUG_INFO = False
+FLOATX = theano.config.floatX
 
 
 def lerp(t, old, new):
@@ -16,16 +19,16 @@ class State(object):
     """
     def __init__(self, n, k):
         rng = np.random.RandomState(0)
-        self.value = rng.uniform(size=(n, k))
+        self.var = theano.shared(np.float32(rng.uniform(size=(n, k))), name='X')
         #self.value = np.zeros((n, k))
         self.k = k
         self.n = n
 
     def variance(self):
-        return np.average(np.log(np.var(self.value, axis=1)))
+        return np.average(np.log(np.var(self.var.get_value(), axis=1)))
 
     def energy(self):
-        return np.average(np.square(self.value), axis=1)
+        return np.average(np.square(self.var.get_value()), axis=1)
 
 
 class Model(object):
@@ -33,6 +36,8 @@ class Model(object):
         rng = np.random.RandomState(0)
         self.m = m  # input state size
         self.n = n  # latent space size
+        self.model_update_f = {}
+        self.state_update_f = {}
         self.nonlin = nonlin
         self.identity = identity
         # This list holds all the fast state information the model has.
@@ -43,12 +48,13 @@ class Model(object):
         self.X = []
         if identity:
             assert self.m == self.n, "Identity phi requires matching dimensions"
-            self.E_XU = np.identity(self.n)
+            E_XU_init = np.identity(self.n, dtype=FLOATX)
         else:
-            self.E_XU = rng.uniform(size=(n, m)) - 0.5
-        self.E_XX = np.identity(n)
-        self.Q = np.identity(n)
-        self.phi = np.dot(self.Q, self.E_XU).T
+            E_XU_init = np.float32(rng.uniform(size=(n, m)) - 0.5)
+        self.E_XU = theano.shared(E_XU_init, name='E_XU')
+        self.E_XX = theano.shared(np.identity(n, dtype=FLOATX), name='E_XX')
+        self.Q = theano.shared(np.identity(n, dtype=FLOATX), name='Q')
+        self.phi = theano.shared(E_XU_init.T, name='phi')
         self.child = None
         self.parent = None
         self.name = name
@@ -72,80 +78,102 @@ class Model(object):
         parent.child = self
 
     def update_model(self, state_index, tau):
-        # Input layer has identity phi, so no action
         if self.identity:
             return
+        if state_index in self.model_update_f:
+            return self.model_update_f[state_index](tau)
+        else:
+            x = self.X[state_index]
+            x_prev = self.parent.X[state_index]
+            assert x_prev.k == x.k, "Sample size mismatch"
+            assert x_prev.n == self.m, "Input dim mismatch"
+            assert x.n == self.n, "Output dim mismatch"
+            assert not self.identity, "Trying to update identity layer, probably input"
+            k = x.k
+            tau_in = T.scalar('tau', dtype=FLOATX)
+            (E_XU_new, d1) = lerp(tau_in,
+                                  self.E_XU,
+                                  T.dot(x.var, x_prev.var.T) / k)
+            (E_XX_new, d2) = lerp(tau_in,
+                                  self.E_XX,
+                                  T.dot(x.var, x.var.T) / k)
+            E_XU_update = (self.E_XU, E_XU_new)
+            E_XX_update = (self.E_XX, E_XX_new)
+            b = 1.
+            d = T.diagonal(E_XX_new)
+            Q_new = theano.sandbox.linalg.ops.diag(b / T.where(d < 0.05, 0.05, d))
+            Q_update = (self.Q, Q_new)
 
-        x = self.X[state_index]
-        x_prev = self.parent.X[state_index]
-        assert x_prev.k == x.k, "Sample size mismatch"
-        assert x_prev.n == self.m, "Input dim mismatch"
-        assert x.n == self.n, "Output dim mismatch"
-        assert not self.identity, "Trying to update identity layer, probably input"
-        k = x.k
-        (self.E_XU, d1) = lerp(tau,
-                               self.E_XU,
-                               np.dot(x.value, x_prev.value.T) / k)
+            # TODO: optional spatial neighborhood coupling
+            phi_update = (self.phi, T.dot(Q_new, E_XU_new).T)
 
-        (self.E_XX, d2) = lerp(tau,
-                               self.E_XX,
-                               np.dot(x.value, x.value.T) / k)
-        b = 1.
-        d = np.diagonal(self.E_XX)
-        np.fill_diagonal(self.Q, b / np.where(d < 0.05, 0.05, d))
+            self.model_update_f[state_index] = theano.function(
+                inputs=[tau_in],
+                outputs=[d1, d2],
+                updates=[E_XU_update, E_XX_update, Q_update, phi_update])
 
-        # TODO: optional spatial neighborhood coupling
-        self.phi = np.dot(self.Q, self.E_XU).T
+            # Call self now that we have the function set
+            return self.update_model(state_index, tau)
 
-        self.info('Updating model, avg(diag(E_XX))=%.2f, ' % np.average(d) +
-                  'avg phi col norm %.2f' % np.average(np.sqrt(np.sum(np.square(self.phi),
-                                                                       axis=0))))
-
-        return (d1, d2)
+            #self.info('Updating model, avg(diag(E_XX))=%.2f, ' % np.average(d) +
+                      #'avg phi col norm %.2f' % np.average(np.sqrt(np.sum(np.square(self.phi),
+                                                                           #axis=0))))
 
     def update_state(self, state_index, input, tau, missing_values=None):
-        x = self.X[state_index]
-        assert input is None or x.k == input.shape[1], "Sample size mismatch"
-
-        # If there is a layer following thise, get feedback
-        if self.child:
-            feedback = self.child.get_feedback(state_index, self)
+        if state_index in self.state_update_f:
+            return self.state_update_f[state_index](tau)
         else:
-            feedback = 0.
+            tau_in = T.scalar('tau', dtype=FLOATX)
+            x = self.X[state_index]
+            assert input is None or x.k == input.shape[1], "Sample size mismatch"
 
-        # Feedforward originates from previous layer's state or given input
-        if input is None:
-            assert not self.identity
-            feedforward = np.dot(self.phi.T, self.parent.X[state_index].value)
-            origin = self.parent.name
-        else:
-            origin = 'system input (%d dim)' % input.shape[0]
-            feedforward = input
+            # If there is a layer following thise, get feedback
+            if self.child:
+                feedback = self.child.get_feedback(state_index, self)
+            else:
+                feedback = 0.
 
-        #self.info('Updating state[%d]: feedfwd from %s and feedback from %s' %
-                  #(state_index, origin, self.child.name if self.child else "nowhere"))
+            # Feedforward originates from previous layer's state or given input
+            if input is None:
+                assert not self.identity
+                feedforward = T.dot(self.phi.T, self.parent.X[state_index].var)
+                origin = self.parent.name
+            else:
+                origin = 'system input (%d dim)' % input.shape[0]
+                self.input = theano.shared(input, name='input')
+                feedforward = self.input
+
+            #self.info('Updating state[%d]: feedfwd from %s and feedback from %s' %
+                      #(state_index, origin, self.child.name if self.child else "nowhere"))
 
 
-        # Apply nonlinearity to feedforward path only
-        if self.nonlin:
-            feedforward = self.nonlin(feedforward)
+            # Apply nonlinearity to feedforward path only
+            if self.nonlin:
+                feedforward = self.nonlin(feedforward)
 
-        new_value = feedforward - feedback
+            new_value = feedforward - feedback
 
-        # If predicting missing values, force them to zero in residual so that
-        # they don't influence learning
-        if missing_values is not None and input is not None:
-            new_value[missing_values] = 0.
+            # If predicting missing values, force them to zero in residual so
+            # that they don't influence learning
+            if missing_values is not None and input is not None:
+                self.missing_values = theano.shared(missing_values, name='missings')
+                new_value[self.missing_values] = 0.
 
-        # Or if we want to apply nonlinearity to the result
-        #if self.nonlin:
-            #new_value = self.nonlin(new_value)
+            # Or if we want to apply nonlinearity to the result
+            #if self.nonlin:
+                #new_value = self.nonlin(new_value)
 
-        (x.value, d) = lerp(tau, x.value, new_value)
-        return d
+            (new_X, d) = lerp(tau_in, x.var, new_value)
+
+            self.state_update_f[state_index] = theano.function(
+                inputs=[tau_in],
+                outputs=[d],
+                updates=[(x.var, new_X)])
+
+            return self.update_state(state_index, input, tau, missing_values)
 
     def get_feedback(self, state_index, parent=None):
-        return np.dot(self.phi, self.X[state_index].value)
+        return T.dot(self.phi, self.X[state_index].var)
 
     def info(self, str):
         if DEBUG_INFO:
@@ -352,7 +380,7 @@ class ECA(object):
         self.converge_state(i, u, y, tau=10.)
 
         # Take a copy, and clean up the temporary state
-        val = self.l_Y.child.get_feedback(i)
+        val = self.l_Y.child.get_feedback(i).eval()
         for l in self.layers:
             l.delete_state()
         return val
@@ -398,29 +426,29 @@ class ECA(object):
         l = self.l_U
         while l.child and not isinstance(l.child, CCAModel):
             l = l.child
-        return l.X[i].value
+        return l.X[i].var.get_value()
 
     def uest(self, i=0):
-        return self.l_U.child.get_feedback(i)
+        return self.l_U.child.get_feedback(i).eval()
 
     def first_phi(self):
         # index is omitted for now, and the lowest layer is plotted
-        return self.l_U.child.phi
+        return self.l_U.child.phi.get_value()
 
     def variance(self, states=None):
         f = lambda l: (l.name, l.X[0].variance())
         return map(f, self.layers)
 
     def energy(self):
-        f = lambda l: (l.name, np.diagonal(l.E_XX))
+        f = lambda l: (l.name, np.diagonal(l.E_XX.get_value()))
         return map(f, self.layers)
 
     def avg_levels(self):
-        f = lambda l: (l.name, np.linalg.norm(np.average(l.X[0].value, axis=1)))
+        f = lambda l: (l.name, np.linalg.norm(np.average(l.X[0].var.get_value(), axis=1)))
         return map(f, self.layers)
 
     def phi_norms(self):
-        f = lambda l: (l.name, np.average(np.linalg.norm(l.phi, axis=0)))
+        f = lambda l: (l.name, np.average(np.linalg.norm(l.phi.get_value(), axis=0)))
         return map(f, self.layers)
 
     def reconstruction_error(self):

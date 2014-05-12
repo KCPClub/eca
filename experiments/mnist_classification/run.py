@@ -149,7 +149,7 @@ class TestCaseBase(object):
 
         (uv, yv) = self.data.get('val', limit=self.batch_size, as_one_hot=self.onehot)
         if self.y_in_u:
-            uv = np.vstack((uv, np.zeros((10, uv.shape[1]))))
+            uv = np.vstack((uv, np.zeros((10, uv.shape[1]), dtype=np.float32)))
         val_acc = self.accuracy(estimate(uv), yv)
         return (trn_acc, val_acc)
 
