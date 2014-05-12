@@ -1,4 +1,8 @@
-eca
+ECA
 ===
 
-Emergent component analysis
+Emergent Component Analysis
+
+License
+---
+MIT
