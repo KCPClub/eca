@@ -5,6 +5,7 @@ import gzip
 import os
 import time
 from eca import ECA
+import theano.tensor as T
 
 # KNN based algorithm was used to prefill nans in above to form this
 DATA_PATH = os.path.join('experiments', 'missing_value')
@@ -124,7 +125,7 @@ def eca_missing_value_prediction(data, params):
             print "A: %5.2f %%" % (acc * 100.),
             print "U var: %.2f" % m.variance()[0][1],
             print "T: %4.1f" % tau,
-            print 'U MSE: %.5f' % np.average(np.square(x.T - m.l_U.X[0].value)),
+            print 'U MSE: %.5f' % np.average(np.square(x.T - m.l_U.X[0].var.get_value())),
             print 'Took [s]: %.2f' % elapsed
             t = time.time()
 
@@ -136,12 +137,12 @@ def eca_missing_value_prediction(data, params):
 def main():
     repeats = 1  # per configuration
 
-    relu = lambda x: np.where(x < 0., 0., x)
+    relu = lambda x: T.where(x < 0., 0., x)
     runs = [
         # tanh requires higher tau
         {'config': {'layers': [70], 'tau': (20, 4, 0.95), 'iters': 200, 'nonlin': relu}},
-        {'config': {'layers': [60], 'tau': (20, 4, 0.99), 'iters': 200, 'nonlin': np.tanh}},
-        {'config': {'layers': [70], 'tau': (20, 4, 0.99), 'iters': 200, 'nonlin': np.tanh}},
+        {'config': {'layers': [60], 'tau': (20, 4, 0.99), 'iters': 200, 'nonlin': T.tanh}},
+        {'config': {'layers': [70], 'tau': (20, 4, 0.99), 'iters': 200, 'nonlin': T.tanh}},
     ]
 
     try:

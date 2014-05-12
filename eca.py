@@ -62,7 +62,8 @@ class Model(object):
     def delete_state(self):
         assert len(self.X) > 1, "Cannot delete default state"
         # Discard the last one
-        self.X = self.X[:-1]
+        del self.X[-1]
+        del self.state_update_f[len(self.X)]
 
     def create_state(self, k):
         self.X.append(State(self.n, k))
@@ -89,7 +90,7 @@ class Model(object):
             assert x_prev.n == self.m, "Input dim mismatch"
             assert x.n == self.n, "Output dim mismatch"
             assert not self.identity, "Trying to update identity layer, probably input"
-            k = x.k
+            k = np.float32(x.k)
             tau_in = T.scalar('tau', dtype=FLOATX)
             (E_XU_new, d1) = lerp(tau_in,
                                   self.E_XU,
@@ -157,7 +158,7 @@ class Model(object):
             # that they don't influence learning
             if missing_values is not None and input is not None:
                 self.missing_values = theano.shared(missing_values, name='missings')
-                new_value[self.missing_values] = 0.
+                new_value = T.where(missing_values, 0.0, new_value)
 
             # Or if we want to apply nonlinearity to the result
             #if self.nonlin:
@@ -373,7 +374,7 @@ class ECA(object):
 
     def predict_Y(self, u):
         k = u.shape[1]
-        y = np.zeros((self.l_Y.m, k)) if self.l_Y else None
+        y = np.zeros((self.l_Y.m, k), np.float32) if self.l_Y else None
         # Create a temporary state
         for l in self.layers:
             i = l.create_state(k)
@@ -387,7 +388,7 @@ class ECA(object):
 
     def converged_U(self, u, missing=None):
         k = u.shape[1]
-        y = np.zeros((self.l_Y.m, k)) if self.l_Y else None
+        y = np.zeros((self.l_Y.m, k), dtype=np.float32) if self.l_Y else None
         # Create a temporary state
         for l in self.layers:
             i = l.create_state(k)
@@ -402,7 +403,7 @@ class ECA(object):
 
     def converged_X(self, u):
         k = u.shape[1]
-        y = np.zeros((self.l_Y.m, k)) if self.l_Y else None
+        y = np.zeros((self.l_Y.m, k), dtype=np.float32) if self.l_Y else None
         # Create a temporary state
         for l in self.layers:
             i = l.create_state(k)
