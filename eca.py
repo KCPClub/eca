@@ -1,6 +1,5 @@
 import numpy as np
 import time as t
-from utils import rearrange_for_plot
 DEBUG_INFO = False
 
 
@@ -177,7 +176,7 @@ class CCAModel(Model):
         self.E_ZZ = self.E_ZZ[:-1]
         return super(CCAModel, self).delete_state()
 
-    def update_state(self, i, input, tau):
+    def update_state(self, i, input, tau, missing):
         z = self.X[i]
         E_ZZ = self.E_ZZ[i]
         assert input is None, "CCA state cannot use input"
@@ -353,7 +352,22 @@ class ECA(object):
         self.converge_state(i, u, y, tau=10.)
 
         # Take a copy, and clean up the temporary state
-        val = self.l_Y.X[i].value.copy()
+        val = self.l_Y.child.get_feedback(i)
+        for l in self.layers:
+            l.delete_state()
+        return val
+
+    def converged_U(self, u, missing=None):
+        k = u.shape[1]
+        y = np.zeros((self.l_Y.m, k)) if self.l_Y else None
+        # Create a temporary state
+        for l in self.layers:
+            i = l.create_state(k)
+        assert i > 0, '0 is for training data'
+        self.converge_state(i, u, y, tau=5.)
+
+        # Take a copy, and clean up the temporary state
+        val = self.uest(i)
         for l in self.layers:
             l.delete_state()
         return val
@@ -386,12 +400,12 @@ class ECA(object):
             l = l.child
         return l.X[i].value
 
-    def uest(self):
-        return self.l_U.child.get_feedback(0)
+    def uest(self, i=0):
+        return self.l_U.child.get_feedback(i)
 
-    def phi_im(self, index):
+    def first_phi(self):
         # index is omitted for now, and the lowest layer is plotted
-        return rearrange_for_plot(self.l_U.child.phi)
+        return self.l_U.child.phi
 
     def variance(self, states=None):
         f = lambda l: (l.name, l.X[0].variance())

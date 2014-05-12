@@ -33,7 +33,7 @@ def rearrange_for_plot(w):
     return rows
 
 
-class Data(object):
+class MnistData(object):
     """
     Class for handling training, validation, and test data
     """

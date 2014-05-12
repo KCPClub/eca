@@ -3,9 +3,10 @@ import time
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import numpy as np
+from utils import rearrange_for_plot
 
 from eca import ECA
-from utils import Data
+from utils import MnistData
 
 conf = {
     'use_minibatches': False,
@@ -32,7 +33,7 @@ class TestCaseBase(object):
     def __init__(self):
         self.batch_size = 1000  # Actually training input size (k)
         self.testset_size = 1000
-        self.data = Data(batch_size=self.batch_size, testset_size=self.testset_size)
+        self.data = MnistData(batch_size=self.batch_size, testset_size=self.testset_size)
         self.trn_iters = 400
         self.mdl = None
         self.onehot = False
@@ -148,6 +149,10 @@ class TestCaseBase(object):
         val_acc = self.accuracy(estimate(uv), yv)
         return (trn_acc, val_acc)
 
+    def visualize(self):
+        plt.imshow(rearrange_for_plot(self.mdl.first_phi()), cmap=cm.Greys_r)
+        plt.show()
+
 rect = lambda x: np.where(x < 0., 0., x)
 
 class UnsuperLayer(TestCaseBase):
@@ -161,10 +166,6 @@ class UnsuperLayer(TestCaseBase):
                        0,  # n of output
                        np.abs) # np.tanh, rect, None, etc..
 
-    def visualize(self):
-        plt.imshow(self.mdl.phi_im(1), cmap=cm.Greys_r)
-        plt.show()
-
 
 class SuperLayer(TestCaseBase):
     def configure(self):
@@ -177,10 +178,6 @@ class SuperLayer(TestCaseBase):
                        self.data.size('trn', 0)[0][0],
                        self.data.size('trn', 0, as_one_hot=True)[1][0],
                        rect)
-
-    def visualize(self):
-        plt.imshow(self.mdl.phi_im(1), cmap=cm.Greys_r)
-        plt.show()
 
     def calculate_accuracy(self, u, y):
         # Use base class implementation, because CCA regression doesn't work?
