@@ -10,8 +10,8 @@ def update_accu_one(U, X):
 
 
 def update_accu_both(U, X):
-    U = (1-l)*U + l*(u - 1*X)
-    X = (1-l)*X + l*(1*U)
+    U = 1*U + l*(u - 1*X)
+    X = 1*X + l*(1*U)
     return (U, X)
 
 
@@ -34,6 +34,7 @@ updates = [update_accu_one,
 x = range(30)
 for j in range(len(updates)):
     plt.subplot(len(updates), 1, j)
+    plt.title(updates[j].func_name)
     l = 0.3
     U = 20
     X = 0
