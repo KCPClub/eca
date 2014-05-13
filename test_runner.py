@@ -19,9 +19,11 @@ else:
 
 
 def get_optimal_system_size(input):
-    singulars = np.linalg.svd(input)[1]
+    #cov = np.dot(input, input.T) / input.shape[1]
+    #singulars = np.sqrt(sorted(np.linalg.eigvalsh(cov), reverse=True))
+    singulars = np.linalg.svd(input, compute_uv=False) # / np.sqrt(input.shape[1])
     for i in range(1, len(singulars)):
-        if np.square(singulars[i]) < np.square(np.sum(singulars[:i]) / ((i + 1) * (1 + 1) - 1)):
+        if singulars[i] < np.mean(singulars[:i]) / 2:
             print 'Optimal n for linear system would be', i
             break
 
