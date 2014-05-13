@@ -2,6 +2,7 @@
 import time
 from utils import rearrange_for_plot
 import numpy as np
+import theano.tensor as T
 
 from eca import ECA
 from utils import MnistData
@@ -164,7 +165,7 @@ class UnsuperLayer(TestCaseBase):
         self.mdl = ECA(layers,
                        self.data.size('trn', 0)[0][0] + 10,
                        0,  # n of output
-                       np.abs)  # np.tanh, rect, None, etc..
+                       T.abs_)  # np.tanh, rect, None, etc..
 
     def visualize(self):
         import matplotlib.pyplot as plt

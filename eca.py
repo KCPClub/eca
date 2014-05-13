@@ -64,6 +64,7 @@ class Model(object):
         # Discard the last one
         del self.X[-1]
         del self.state_update_f[len(self.X)]
+        assert len(self.X) not in self.model_update_f
 
     def create_state(self, k):
         self.X.append(State(self.n, k))
@@ -141,7 +142,7 @@ class Model(object):
                 origin = self.parent.name
             else:
                 origin = 'system input (%d dim)' % input.shape[0]
-                self.input = theano.shared(input, name='input')
+                self.input = theano.shared(np.float32(input), name='input')
                 feedforward = self.input
 
             #self.info('Updating state[%d]: feedfwd from %s and feedback from %s' %
