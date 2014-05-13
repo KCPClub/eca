@@ -20,7 +20,6 @@ class State(object):
     def __init__(self, n, k):
         rng = np.random.RandomState(0)
         self.var = theano.shared(np.float32(rng.uniform(size=(n, k))), name='X')
-        #self.value = np.zeros((n, k))
         self.k = k
         self.n = n
 
@@ -32,32 +31,34 @@ class State(object):
 
 
 class Model(object):
-    def __init__(self, name, (m, n), nonlin=None, identity=False):
+    def __init__(self, name, n, parent, nonlin, identity=False):
+        m = n if parent is None else parent.n
         rng = np.random.RandomState(0)
-        self.m = m  # input state size
-        self.n = n  # latent space size
+        self.n = n
+        self.m = m
         self.model_update_f = {}
         self.state_update_f = {}
         self.nonlin = nonlin
-        self.identity = identity
         # This list holds all the fast state information the model has.
         # Because the model can be used with data of various lengths k, and
         # data sets, different data instances are put here so that 0
         # corresponds to the training data. Indices 1- are available for the
         # model user
         self.X = []
-        if identity:
-            assert self.m == self.n, "Identity phi requires matching dimensions"
-            E_XU_init = np.identity(self.n, dtype=FLOATX)
-        else:
-            E_XU_init = np.float32(rng.uniform(size=(n, m)) - 0.5)
-        self.E_XU = theano.shared(E_XU_init, name='E_XU')
+        rand_init = np.float32(rng.uniform(size=(n, m)) - 0.5)
+        self.E_XU = theano.shared(rand_init, name='E_XU')
         self.E_XX = theano.shared(np.identity(n, dtype=FLOATX), name='E_XX')
         self.Q = theano.shared(np.identity(n, dtype=FLOATX), name='Q')
-        self.phi = theano.shared(E_XU_init.T, name='phi')
+        self.phi = theano.shared(rand_init.T, name='phi')
         self.child = None
-        self.parent = None
         self.name = name
+        self.neg_feedforward = False
+        self.missing_values = None
+        self.parent = parent
+
+        if parent:
+            assert parent.child is None
+            parent.child = self
 
     def delete_state(self):
         assert len(self.X) > 1, "Cannot delete default state"
@@ -71,26 +72,15 @@ class Model(object):
         # Return the index of the created state
         return len(self.X) - 1
 
-    def connect_parent(self, parent):
-        self.info('has parent %s' % parent.name)
-        assert self.m == parent.n, "Child dimensionality doesn't match"
-        assert self.child is None
-        assert self.parent is None
-        self.parent = parent
-        parent.child = self
-
-    def update_model(self, state_index, tau):
-        if self.identity:
-            return
-        if state_index in self.model_update_f:
-            return self.model_update_f[state_index](tau)
+    def update_model(self, i, tau):
+        if i in self.model_update_f:
+            return self.model_update_f[i](tau)
         else:
-            x = self.X[state_index]
-            x_prev = self.parent.X[state_index]
+            x = self.X[i]
+            x_prev = self.parent.X[i]
             assert x_prev.k == x.k, "Sample size mismatch"
             assert x_prev.n == self.m, "Input dim mismatch"
             assert x.n == self.n, "Output dim mismatch"
-            assert not self.identity, "Trying to update identity layer, probably input"
             k = np.float32(x.k)
             tau_in = T.scalar('tau', dtype=FLOATX)
             (E_XU_new, d1) = lerp(tau_in,
@@ -109,57 +99,61 @@ class Model(object):
             # TODO: optional spatial neighborhood coupling
             phi_update = (self.phi, T.dot(Q_new, E_XU_new).T)
 
-            self.model_update_f[state_index] = theano.function(
+            self.model_update_f[i] = theano.function(
                 inputs=[tau_in],
                 outputs=[d1, d2],
                 updates=[E_XU_update, E_XX_update, Q_update, phi_update])
 
-            # Call self now that we have the function set
-            return self.update_model(state_index, tau)
+            self.info('Model update between ' + self.name + ' and ' + self.parent.name)
 
             #self.info('Updating model, avg(diag(E_XX))=%.2f, ' % np.average(d) +
                       #'avg phi col norm %.2f' % np.average(np.sqrt(np.sum(np.square(self.phi),
                                                                            #axis=0))))
+            # Call self now that we have the function set
+            return self.update_model(i, tau)
 
-    def update_state(self, state_index, input, tau, missing_values=None):
-        if state_index in self.state_update_f:
-            return self.state_update_f[state_index](tau)
+
+    def update_state(self, i, input, tau):
+        if i in self.state_update_f:
+            return self.state_update_f[i](tau)
         else:
             tau_in = T.scalar('tau', dtype=FLOATX)
-            x = self.X[state_index]
+            x = self.X[i]
             assert input is None or x.k == input.shape[1], "Sample size mismatch"
 
             # If there is a layer following thise, get feedback
             if self.child:
-                feedback = self.child.get_feedback(state_index, self)
+                feedback = self.child.get_feedback(i, self)
             else:
                 feedback = 0.
 
             # Feedforward originates from previous layer's state or given input
             if input is None:
-                assert not self.identity
-                feedforward = T.dot(self.phi.T, self.parent.X[state_index].var)
+                feedforward = T.dot(self.phi.T, self.parent.X[i].var)
                 origin = self.parent.name
             else:
-                origin = 'system input (%d dim)' % input.shape[0]
+                self.missing_values = theano.shared(np.float32(~np.isnan(input)), name='missings')
+                input[np.isnan(input)] = 0.0
                 self.input = theano.shared(np.float32(input), name='input')
                 feedforward = self.input
 
-            #self.info('Updating state[%d]: feedfwd from %s and feedback from %s' %
-                      #(state_index, origin, self.child.name if self.child else "nowhere"))
-
+            self.info('Updating state[%d]: feedfwd from %s and feedback from %s' %
+                      (i,
+                       self.parent.name if self.parent else 'input',
+                       self.child.name if self.child else "nowhere"))
 
             # Apply nonlinearity to feedforward path only
             if self.nonlin:
                 feedforward = self.nonlin(feedforward)
+            if self.neg_feedforward:
+                feedforward *= np.float32(-1.0)
 
             new_value = feedforward - feedback
 
             # If predicting missing values, force them to zero in residual so
             # that they don't influence learning
-            if missing_values is not None and input is not None:
-                self.missing_values = theano.shared(missing_values, name='missings')
-                new_value = T.where(missing_values, 0.0, new_value)
+            if self.missing_values is not None:
+                new_value = new_value * self.missing_values
 
             # Or if we want to apply nonlinearity to the result
             #if self.nonlin:
@@ -167,19 +161,66 @@ class Model(object):
 
             (new_X, d) = lerp(tau_in, x.var, new_value)
 
-            self.state_update_f[state_index] = theano.function(
+            self.state_update_f[i] = theano.function(
                 inputs=[tau_in],
                 outputs=[d],
                 updates=[(x.var, new_X)])
 
-            return self.update_state(state_index, input, tau, missing_values)
+            return self.update_state(i, input, tau)
 
-    def get_feedback(self, state_index, parent=None):
-        return T.dot(self.phi, self.X[state_index].var)
+    def get_feedback(self, i, parent=None):
+        out = T.dot(self.phi, self.X[i].var)
+        if self.nonlin:
+            out = self.nonlin(out)
+        return out
 
     def info(self, str):
         if DEBUG_INFO:
             print '%5s:' % self.name, str
+
+
+class InputModel(Model):
+    def __init__(self, name, n):
+        super(InputModel, self).__init__(name,  n, None, None, True)
+
+    def update_model(self, i, tau):
+        pass
+
+
+class CollisionModel(Model):
+    def __init__(self, name, n, (parent1, parent2), nonlin=None):
+        self.m1 = Model(name + '1', n, parent1, nonlin)
+        self.m2 = Model(name + '2', n, parent2, nonlin)
+        self.m2.neg_feedforward = False
+        self.n = n
+        self.X = []
+        self.name = name
+        self.phi = self.m1.phi
+
+    def update_model(self, i, tau):
+        self.m1.update_model(i, tau)
+        self.m2.update_model(i, tau)
+
+        # TODO: Handle model update deltas
+        return (0, 0)
+
+    def update_state(self, i, input, tau):
+        assert False, 'should be never called'
+        d1 = self.m1.update_state(i, input, tau)
+        d2 = self.m2.update_state(i, input, tau)
+        return np.maximum(d1, d2)
+
+    def delete_state(self):
+        assert len(self.X) > 1, "Cannot delete default state"
+        del self.X[-1]
+        del self.m1.state_update_f[len(self.X)]
+        del self.m2.state_update_f[len(self.X)]
+
+    def create_state(self, k):
+        self.X.append(State(self.n, k))
+        self.m1.X = self.X
+        self.m2.X = self.X
+        return len(self.X) - 1
 
 
 class CCAModel(Model):
@@ -190,7 +231,7 @@ class CCAModel(Model):
         # Phi of this layer is not in use, mark it as nan
         self.phi = np.zeros((1, 1))
 
-    def update_model(self, state_index, tau):
+    def update_model(self, i, tau):
         """ There is no global model state for CCA layer, instead, everything
         happens in update_state
         """
@@ -206,7 +247,7 @@ class CCAModel(Model):
         self.E_ZZ = self.E_ZZ[:-1]
         return super(CCAModel, self).delete_state()
 
-    def update_state(self, i, input, tau, missing):
+    def update_state(self, i, input, tau):
         z = self.X[i]
         E_ZZ = self.E_ZZ[i]
         assert input is None, "CCA state cannot use input"
@@ -231,27 +272,20 @@ class CCAModel(Model):
         self.E_XU = None
         return np.max((np.abs(di), np.average(np.abs(dz))))
 
-    def get_feedback(self, state_index, parent=None):
+    def get_feedback(self, i, parent=None):
         assert parent is not None, 'CCA needs parent'
         assert len(self.parent) == 2, 'CCA should have exactly 2 parents'
         # XXX: Uncomment the following to avoid signal propagation
         # back from CCA layer
         #return np.zeros(())
 
-        z = self.X[state_index]
+        z = self.X[i]
         # Find the other branch connecting to this z
         x_other = list(set(self.parent) - set([parent]))[0]
 
         # This is roughly: x_u_delta = self.Q * x_y * z
-        phi = self.Q * x_other.X[state_index].value
+        phi = self.Q * x_other.X[i].value
         return phi * z.value
-
-    def connect_parent(self, parent):
-        self.info('has parent %s' % parent.name)
-        assert self.m == parent.n, "Child dimensionality doesn't match"
-        assert self.child is None
-        self.parent = parent if self.parent is None else [self.parent, parent]
-        parent.child = self
 
 
 class ECA(object):
@@ -282,52 +316,40 @@ class ECA(object):
 
     def __init__(self, n_layers, n_u, n_y, nonlin=None):
         # 1. Create layers for u branch
-        n_all = [n_u] + n_layers
-        print 'Creating', len(n_all), 'layers with n in', n_all, 'including input layer U'
+        print 'Creating', len(n_layers), 'layers with n in', n_layers
 
         # First the input layer U
-        self.l_U = Model('U', (n_u, n_u), None, True)
-        self.layers = [self.l_U]
+        self.l_U = InputModel('U', n_u)
+        self.layers = layers = [self.l_U]
 
         # Then the consecutive layers U -> X_u1 -> X_u2 -> ...
-        for i in range(len(n_all) - 1):
-            name = "X_u%d" % (i + 1)
-            self.layers.append(Model(name, (n_all[i], n_all[i + 1]), nonlin))
-            self.layers[-1].connect_parent(self.layers[-2])
+        n_ulayers = n_layers[:-1] if n_y else n_layers
+        for (i, n) in enumerate(n_ulayers):
+            m = Model("X_u%d" % (i + 1), n, layers[-1], nonlin)
+            layers.append(m)
 
-        last_of_u_branch = self.layers[-1]
         self.l_Y = None
 
         # No supervised y signal => all done!
-        if n_y is 0:
+        if not n_y:
             return
 
         # 2. Create layers for y branch if still here
         # Keep y branch shorter by only taking the last layer dimension
-        n_all = [n_y] + [n_layers[-1]]
-        print 'Creating', len(n_all), 'layers with n in', n_all, 'including input layer Y'
+        print 'Creating layer (%d) for classification', n_y
 
         # First the input layer Y
-        self.l_Y = Model('Y', (n_y, n_y), None, True)
-        self.layers += [self.l_Y]
+        self.l_Y = InputModel('Y', n_y)
+        layers += [self.l_Y]
 
-        # Then the consecutive layers Y -> X_y1 -> X_y2 -> ...
-        for i in range(len(n_all) - 1):
-            name = "X_y%d" % (i + 1)
-            self.layers.append(Model(name, (n_all[i], n_all[i + 1]), nonlin))
-            self.layers[-1].connect_parent(self.layers[-2])
+        # Then add connecting layer to connect u and y branches:
+        # ... -> X_uN -> Z
+        # ... -> Y    --'
+        print 'Creating collision layer with parents:', layers[-2].name, layers[-1].name
+        cl = CollisionModel('Z', n_layers[-1], (layers[-2], layers[-1]))
+        layers += [cl]
 
-        # Finally add CCA layer to connect u and y branches:
-        # ... -> X_uN -> z
-        # ... -> X_yN --'
-        print 'Creating CCA layer %d -> %d' % (n_all[-1], 1),
-        print 'with parents:', self.layers[-2].name, last_of_u_branch.name
-        self.cca = CCAModel('z', (n_all[-1], 1))
-        self.layers += [self.cca]
-        self.cca.connect_parent(self.layers[-2])
-        self.cca.connect_parent(last_of_u_branch)
-
-    def update(self, u, y, tau, missing=None):
+    def update(self, u, y, tau):
         """
         Performs update round-trip from u to X and back.
         """
@@ -336,21 +358,21 @@ class ECA(object):
             for l in self.layers:
                 l.create_state(u.shape[1])
 
-        self.update_states(0, u, y, tau, missing)
+        self.update_states(0, u, y, tau)
         self.update_models(0, tau)
 
     def update_models(self, i, tau):
         for l in self.layers:
             l.update_model(i, tau)
 
-    def update_states(self, i, u, y, tau, missing=None):
+    def update_states(self, i, u, y, tau):
         max_diff = -1e100
 
         # Loop over net inputs
         for (x, val) in zip([self.l_U, self.l_Y], [u, y]):
             # Loop through the chain of layers
             while x:
-                d = x.update_state(i, val, tau, missing)
+                d = x.update_state(i, val, tau)
                 x = x.child
                 val = None  # Only the first layer will have value in
 
@@ -358,14 +380,14 @@ class ECA(object):
                 max_diff = np.max([max_diff, np.average(np.abs(d))])
         return max_diff
 
-    def converge_state(self, i, u, y, tau, missing=None):
+    def converge_state(self, i, u, y, tau):
         max_delta = 1.0
         iter = 0
-        (delta_limit, time_limit, iter_limit) = (1e-3, 20, 100)
+        (delta_limit, time_limit, iter_limit) = (1e-3, 20, 200)
         t_start = t.time()
         # Convergence condition, pretty arbitrary for now
         while max_delta > delta_limit and t.time() - t_start < time_limit:
-            max_delta = self.update_states(i, u, y, tau, missing)
+            max_delta = self.update_states(i, u, y, tau)
             iter += 1
             if iter >= iter_limit:
                 break
@@ -373,65 +395,48 @@ class ECA(object):
         print 'iters, delta %.4f' % max_delta,
         print 'Limits: i:', iter_limit, 't:', time_limit, 'd:', delta_limit
 
-    def predict_Y(self, u):
+    def converge(self, u, y, f):
         k = u.shape[1]
-        y = np.zeros((self.l_Y.m, k), np.float32) if self.l_Y else None
         # Create a temporary state
         for l in self.layers:
             i = l.create_state(k)
         self.converge_state(i, u, y, 10.)
 
         # Take a copy, and clean up the temporary state
-        val = self.l_Y.child.get_feedback(i).eval()
+        val = f(i)
         for l in self.layers:
             l.delete_state()
         return val
 
-    def converged_U(self, u, missing=None):
-        k = u.shape[1]
-        y = np.zeros((self.l_Y.m, k), dtype=np.float32) if self.l_Y else None
-        # Create a temporary state
-        for l in self.layers:
-            i = l.create_state(k)
-        assert i > 0, '0 is for training data'
-        self.converge_state(i, u, y, 5., missing)
+    def estimate_y(self, u, y):
+        return self.converge(u, y, self.yest)
 
-        # Take a copy, and clean up the temporary state
-        val = self.uest(i)
-        for l in self.layers:
-            l.delete_state()
-        return val
+    def estimate_u(self, u, y):
+        return self.converge(u, y, self.uest)
 
-    def converged_X(self, u):
-        k = u.shape[1]
-        y = np.zeros((self.l_Y.m, k), dtype=np.float32) if self.l_Y else None
-        # Create a temporary state
-        for l in self.layers:
-            i = l.create_state(k)
-        assert i > 0, '0 is for training data'
-        self.converge_state(i, u, y, 5.)
-
-        # Take a copy, and clean up the temporary state
-        val = self.latent_layer(i).copy()
-        for l in self.layers:
-            l.delete_state()
-        return val
+    def estimate_x(self, u, y):
+        return self.converge(u, y, self.xest)
+        #y = np.zeros((self.l_Y.m, k), dtype=np.float32) if self.l_Y else None
 
     def fit_classifier(self, classifier, y):
         classifier.fit(self.latent_layer(0).T, y)
 
-    def latent_layer(self, i):
+    def xest(self, i=0):
         """
-        Finds the latent representation for classification. The last or one
-        before CCA.
+        Finds the last latent presentation for classification. The last or one
+        before collision or CCA.
         """
         l = self.l_U
         while l.child and not isinstance(l.child, CCAModel):
             l = l.child
+        # Should this be Xbar or the feedforward ?
         return l.X[i].var.get_value()
 
     def uest(self, i=0):
         return self.l_U.child.get_feedback(i).eval()
+
+    def yest(self, i=0):
+        return self.l_Y.child.get_feedback(i).eval()
 
     def first_phi(self):
         # index is omitted for now, and the lowest layer is plotted

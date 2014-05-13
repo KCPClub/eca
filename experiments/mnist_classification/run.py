@@ -108,22 +108,22 @@ class UnsupervisedLearning(TestCaseBase):
         if type == 'trn':
             u = np.vstack([u, y])
         else:
-            u = np.vstack((u, np.zeros((10, u.shape[1]), dtype=np.float32)))
+            u = np.vstack((u, np.nan * np.zeros((10, u.shape[1]), dtype=np.float32)))
         return (u, y)
 
     def calculate_accuracy(self, u, y):
         if len(y.shape) == 2:
             y = np.argmax(y, axis=0)
 
-        def estimate(data, missing=None):
-            y = self.mdl.converged_U(data, missing)
-            return y[-10:, :]
-
+        # Training error
         y_est = self.mdl.uest()[-10:, :]
-        trn_acc = self.accuracy(y_est[:, :self.testset_size], y.T[:self.testset_size].T)
+        trn_acc = self.accuracy(y_est[:, :self.testset_size],
+                                y.T[:self.testset_size].T)
 
+        # Validation error
         (uv, yv) = self.get_data('val')
-        val_acc = self.accuracy(estimate(uv), yv)
+        y_est = self.mdl.estimate_u(uv, None)[-10:, :]
+        val_acc = self.accuracy(y_est, yv)
         return (trn_acc, val_acc)
 
     def visualize(self):
@@ -135,44 +135,37 @@ class UnsupervisedLearning(TestCaseBase):
 
 class SupervisedLearning(TestCaseBase):
     def configure(self):
-        layers = [20]  # Try e.g. [30, 20] for multiple layers and increase tau start
-        self.tau_start = 30
+        layers = [100]  # Try e.g. [30, 20] for multiple layers and increase tau start
+        self.tau_start = 20
         self.tau_end = 5
         self.tau_alpha = 0.99
         self.mdl = ECA(layers,
                        self.data.size('trn', 0)[0][0],
-                       0,  # n of output
-                       T.abs_)  # np.tanh, rect, None, etc..
-
+                       self.data.size('trn', 0, as_one_hot=True)[1][0],
+                       T.abs_)  # T.tanh, rect, None, etc..
 
     def get_data(self, type):
         assert type in ['tst', 'trn', 'val']
 
         (u, y) = self.data.get(type, i=0, as_one_hot=True)
         # Equalize energies
-        u_avg_en = np.average(np.sum(np.square(u), axis=0))
-        y_avg_en = np.average(np.sum(np.square(y), axis=0))
-        y *= np.sqrt(u_avg_en / y_avg_en)
+        #u_avg_en = np.average(np.sum(np.square(u), axis=0))
+        #y_avg_en = np.average(np.sum(np.square(y), axis=0))
+        #y *= np.sqrt(u_avg_en / y_avg_en)
 
-        if type == 'trn':
-            u = np.vstack([u, y])
-        else:
-            u = np.vstack((u, np.zeros((10, u.shape[1]), dtype=np.float32)))
         return (u, y)
 
     def calculate_accuracy(self, u, y):
         if len(y.shape) == 2:
             y = np.argmax(y, axis=0)
 
-        def estimate(data, missing=None):
-            y = self.mdl.converged_U(data, missing)
-            return y[-10:, :]
-
-        y_est = self.mdl.uest()[-10:, :]
+        # Training error
+        y_est = self.mdl.yest()
         trn_acc = self.accuracy(y_est[:, :self.testset_size], y.T[:self.testset_size].T)
 
+        # Validation error
         (uv, yv) = self.get_data('val')
-        val_acc = self.accuracy(estimate(uv), yv)
+        val_acc = self.accuracy(self.mdl.estimate_y(uv, np.nan * yv), yv)
         return (trn_acc, val_acc)
 
     def visualize(self):
@@ -184,7 +177,8 @@ class SupervisedLearning(TestCaseBase):
 
 def main():
     print 'Initializing...'
-    UnsupervisedLearning()
+    #UnsupervisedLearning()
+    SupervisedLearning()
 
 if __name__ == '__main__':
     main()

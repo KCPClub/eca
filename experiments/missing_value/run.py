@@ -100,7 +100,6 @@ def eca_missing_value_prediction(data, params):
     # Preprocessing, make data binary.
     # Helps with accuracy, not strictly required
     nans = np.isnan(x)
-    x[nans] = 0
     x[x > 0] = 1
 
     (tau, tau_target, alpha) = params['tau']
@@ -112,7 +111,7 @@ def eca_missing_value_prediction(data, params):
     # Main loop
     for i in range(params['iters']):
         tau = alpha * tau + (1 - alpha) * tau_target
-        m.update(x.T, None, tau, missing=nans.T)
+        m.update(x.T, None, tau)
 
         # Progress reporting
         if (i + 1) % 10 == 0:
