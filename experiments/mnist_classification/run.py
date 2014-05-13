@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 import time
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 from utils import rearrange_for_plot
 import numpy as np
 
@@ -110,7 +108,7 @@ class TestCaseBase(object):
                 #", ".join(["%4.2f" % v for v in np.sort(row)[0:3]])
 
         #plt.show()
-        self.visualize()
+        #self.visualize()
 
     def configure(self):
         raise NotImplemented()
@@ -169,6 +167,8 @@ class UnsuperLayer(TestCaseBase):
                        np.abs)  # np.tanh, rect, None, etc..
 
     def visualize(self):
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
         plt.imshow(rearrange_for_plot(self.mdl.first_phi()[:-10, :]), cmap=cm.Greys_r)
         plt.show()
 

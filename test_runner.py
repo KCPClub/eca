@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 import time
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 import numpy as np
 from utils import rearrange_for_plot
 
@@ -106,7 +104,7 @@ class TestCaseBase(object):
                 #", ".join(["%4.2f" % v for v in np.sort(row)[0:3]])
 
         #plt.show()
-        self.visualize()
+        #self.visualize()
 
     def configure(self):
         raise NotImplemented()
@@ -139,6 +137,8 @@ class TestCaseBase(object):
         return (trn_acc, val_acc)
 
     def visualize(self):
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
         plt.imshow(rearrange_for_plot(self.mdl.first_phi()), cmap=cm.Greys_r)
         plt.show()
 
