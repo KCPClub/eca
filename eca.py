@@ -358,14 +358,14 @@ class ECA(object):
                 max_diff = np.max([max_diff, np.average(np.abs(d))])
         return max_diff
 
-    def converge_state(self, i, u, y, tau):
+    def converge_state(self, i, u, y, tau, missing=None):
         max_delta = 1.0
         iter = 0
         (delta_limit, time_limit, iter_limit) = (1e-3, 20, 100)
         t_start = t.time()
         # Convergence condition, pretty arbitrary for now
         while max_delta > delta_limit and t.time() - t_start < time_limit:
-            max_delta = self.update_states(i, u, y, tau)
+            max_delta = self.update_states(i, u, y, tau, missing)
             iter += 1
             if iter >= iter_limit:
                 break
@@ -379,7 +379,7 @@ class ECA(object):
         # Create a temporary state
         for l in self.layers:
             i = l.create_state(k)
-        self.converge_state(i, u, y, tau=10.)
+        self.converge_state(i, u, y, 10.)
 
         # Take a copy, and clean up the temporary state
         val = self.l_Y.child.get_feedback(i).eval()
@@ -394,7 +394,7 @@ class ECA(object):
         for l in self.layers:
             i = l.create_state(k)
         assert i > 0, '0 is for training data'
-        self.converge_state(i, u, y, tau=5.)
+        self.converge_state(i, u, y, 5., missing)
 
         # Take a copy, and clean up the temporary state
         val = self.uest(i)
@@ -409,7 +409,7 @@ class ECA(object):
         for l in self.layers:
             i = l.create_state(k)
         assert i > 0, '0 is for training data'
-        self.converge_state(i, u, y, tau=5.)
+        self.converge_state(i, u, y, 5.)
 
         # Take a copy, and clean up the temporary state
         val = self.latent_layer(i).copy()

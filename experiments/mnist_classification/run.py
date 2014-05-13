@@ -137,9 +137,8 @@ class TestCaseBase(object):
             #y_est = classifier.predict(state.T)
             #return y_est
 
-        def estimate(data):
-            y = self.mdl.converged_U(data)
-            print y.shape, y[-10:, :].shape
+        def estimate(data, missing=None):
+            y = self.mdl.converged_U(data, missing)
             return y[-10:, :]
 
         y_est = self.mdl.uest()[-10:, :]
