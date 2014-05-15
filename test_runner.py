@@ -19,16 +19,6 @@ else:
     from sklearn.linear_model import LogisticRegression
 
 
-def get_optimal_system_size(input):
-    #cov = np.dot(input, input.T) / input.shape[1]
-    #singulars = np.sqrt(sorted(np.linalg.eigvalsh(cov), reverse=True))
-    singulars = np.linalg.svd(input, compute_uv=False) # / np.sqrt(input.shape[1])
-    for i in range(1, len(singulars)):
-        if singulars[i] < np.mean(singulars[:i]) / 2:
-            print 'Optimal n for linear system would be', i
-            break
-
-
 class TestCaseBase(object):
     def __init__(self):
         self.batch_size = 1000  # Actually training input size (k)
@@ -45,7 +35,6 @@ class TestCaseBase(object):
         assert self.mdl is not None
 
         (u, y) = self.data.get('trn', i=0, as_one_hot=self.onehot)
-        #get_optimal_system_size(u)
 
         # This is global slowness that helps the model to get past the
         # unstable beginning..

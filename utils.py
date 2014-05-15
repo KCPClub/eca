@@ -37,7 +37,7 @@ class MnistData(object):
     """
     Class for handling training, validation, and test data
     """
-    def __init__(self, batch_size=500, testset_size=10000):
+    def __init__(self, batch_size=500, testset_size=10000, normalize=True):
         # Download e.g. from http://deeplearning.net/data/mnist/mnist.pkl.gz
         filename = 'mnist.pkl.gz'
         if not os.path.exists(filename):
@@ -53,6 +53,10 @@ class MnistData(object):
             'tst': (np.float32(data[2][0][:testset_size]),
                     np.int32(data[2][1][:testset_size]))
         }
+        if normalize:
+            for x, y in self.data.values():
+                x -= np.mean(x, axis=0, keepdims=True)
+                x /= np.maximum(np.std(x, axis=0, keepdims=True), 1e-10)
 
     def size(self, type, i=None, as_one_hot=False):
         assert type in self.data.keys(), 'type has to be in %s' % str(self.data.keys())
