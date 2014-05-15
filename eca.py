@@ -39,6 +39,8 @@ class Model(object):
         self.model_update_f = {}
         self.state_update_f = {}
         self.nonlin = nonlin
+        # Nonlinearity applied to the estimate coming from child
+        self.nonlin_est = lambda x: x
         # This list holds all the fast state information the model has.
         # Because the model can be used with data of various lengths k, and
         # data sets, different data instances are put here so that 0
@@ -123,41 +125,33 @@ class Model(object):
 
             # If there is a layer following thise, get feedback
             if self.child:
-                feedback = self.child.get_feedback(i, self)
+                estimate = self.estimate(i)
             else:
-                feedback = 0.
+                estimate = 0.
 
             # Feedforward originates from previous layer's state or given input
             if input is None:
                 feedforward = T.dot(self.phi.T, self.parent.X[i].var)
-                origin = self.parent.name
             else:
                 self.missing_values = theano.shared(np.float32(~np.isnan(input)), name='missings')
                 input[np.isnan(input)] = 0.0
                 self.input = theano.shared(np.float32(input), name='input')
                 feedforward = self.input
 
-            self.info('Updating state[%d]: feedfwd from %s and feedback from %s' %
-                      (i,
-                       self.parent.name if self.parent else 'input',
-                       self.child.name if self.child else "nowhere"))
+            self.info('Updating state[%d]: feedfwd from %s and estimate from %s' %
+                      (i, self.parent.name if self.parent else 'input',
+                          self.child.name if self.child else "nowhere"))
 
             # Apply nonlinearity to feedforward path only
             if self.nonlin:
                 feedforward = self.nonlin(feedforward)
-            if self.neg_feedforward:
-                feedforward *= np.float32(-1.0)
 
-            new_value = feedforward - feedback
+            new_value = feedforward - estimate
 
             # If predicting missing values, force them to zero in residual so
             # that they don't influence learning
             if self.missing_values is not None:
                 new_value = new_value * self.missing_values
-
-            # Or if we want to apply nonlinearity to the result
-            #if self.nonlin:
-                #new_value = self.nonlin(new_value)
 
             (new_X, d) = lerp(tau_in, x.var, new_value)
 
@@ -168,11 +162,13 @@ class Model(object):
 
             return self.update_state(i, input, tau)
 
-    def get_feedback(self, i, parent=None):
-        out = T.dot(self.phi, self.X[i].var)
-        if self.nonlin:
-            out = self.nonlin(out)
-        return out
+    def estimate(self, i):
+        if not self.child:
+            return 0.0
+        return self.nonlin_est(self.child.feedback(i, self))
+
+    def feedback(self, i, parent=None):
+        return T.dot(self.phi, self.X[i].var)
 
     def info(self, str):
         if DEBUG_INFO:
@@ -189,13 +185,12 @@ class InputModel(Model):
 
 class CollisionModel(Model):
     def __init__(self, name, n, (parent1, parent2), nonlin=None):
-        self.m1 = Model(name + '1', n, parent1, nonlin)
-        self.m2 = Model(name + '2', n, parent2, nonlin)
-        self.m2.neg_feedforward = False
+        self.m1 = Model(name + '1', n, parent1, nonlin)  # U
+        self.m2 = Model(name + '2', n, parent2, nonlin)  # Y
         self.n = n
         self.X = []
         self.name = name
-        self.phi = self.m1.phi
+        self.phi = self.m1.phi # For visualization
 
     def update_model(self, i, tau):
         self.m1.update_model(i, tau)
@@ -206,9 +201,6 @@ class CollisionModel(Model):
 
     def update_state(self, i, input, tau):
         assert False, 'should be never called'
-        d1 = self.m1.update_state(i, input, tau)
-        d2 = self.m2.update_state(i, input, tau)
-        return np.maximum(d1, d2)
 
     def delete_state(self):
         assert len(self.X) > 1, "Cannot delete default state"
@@ -221,6 +213,9 @@ class CollisionModel(Model):
         self.m1.X = self.X
         self.m2.X = self.X
         return len(self.X) - 1
+
+    def get_feedback(self, i, parent=None):
+        assert False, "should not be called"
 
 
 class CCAModel(Model):
@@ -336,7 +331,7 @@ class ECA(object):
 
         # 2. Create layers for y branch if still here
         # Keep y branch shorter by only taking the last layer dimension
-        print 'Creating layer (%d) for classification', n_y
+        print 'Creating layer (%d) for classification' % n_y
 
         # First the input layer Y
         self.l_Y = InputModel('Y', n_y)
@@ -346,7 +341,7 @@ class ECA(object):
         # ... -> X_uN -> Z
         # ... -> Y    --'
         print 'Creating collision layer with parents:', layers[-2].name, layers[-1].name
-        cl = CollisionModel('Z', n_layers[-1], (layers[-2], layers[-1]))
+        cl = CollisionModel('Z', n_layers[-1], (layers[-2], layers[-1]), nonlin)
         layers += [cl]
 
     def update(self, u, y, tau):
@@ -433,10 +428,10 @@ class ECA(object):
         return l.X[i].var.get_value()
 
     def uest(self, i=0):
-        return self.l_U.child.get_feedback(i).eval()
+        return self.l_U.estimate(i).eval()
 
     def yest(self, i=0):
-        return self.l_Y.child.get_feedback(i).eval()
+        return self.l_Y.estimate(i).eval()
 
     def first_phi(self):
         # index is omitted for now, and the lowest layer is plotted
