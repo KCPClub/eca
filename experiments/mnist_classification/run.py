@@ -103,7 +103,7 @@ class UnsupervisedLearning(TestCaseBase):
         # Equalize energies
         u_avg_en = np.average(np.sum(np.square(u), axis=0))
         y_avg_en = np.average(np.sum(np.square(y), axis=0))
-        y *= np.sqrt(u_avg_en / y_avg_en)
+        #y *= np.sqrt(u_avg_en / y_avg_en)
 
         if type == 'trn':
             u = np.vstack([u, y])
@@ -142,29 +142,39 @@ class SupervisedLearning(TestCaseBase):
         self.mdl = ECA(layers,
                        self.data.size('trn', 0)[0][0],
                        self.data.size('trn', 0, as_one_hot=True)[1][0],
-                       T.abs_)  # T.tanh, rect, None, etc..
+                       #T.tanh)  # T.tanh, rect, None, etc..
+                       rect)  # T.tanh, rect, None, etc..
+                       #lambda x: x)
 
     def get_data(self, type):
         assert type in ['tst', 'trn', 'val']
 
         (u, y) = self.data.get(type, i=0, as_one_hot=True)
-        # Equalize energies
+        #u, y = u.copy(), y.copy()
+        ## Equalize energies to 1.0
+        ##print np.var(u, axis=1)[100:110]
         #u_avg_en = np.average(np.sum(np.square(u), axis=0))
         #y_avg_en = np.average(np.sum(np.square(y), axis=0))
+        #u /= np.sqrt(u_avg_en / y_avg_en)
         #y *= np.sqrt(u_avg_en / y_avg_en)
-
+        #u_avg_en = np.average(np.sum(np.square(u), axis=0))
+        #y_avg_en = np.average(np.sum(np.square(y), axis=0))
+        #print np.max(y)
+        #print np.var(u, axis=1)[100:110]
+        #u *= 100.
+        #y *= 100.
+        #u_avg_en = np.average(np.sum(np.square(u), axis=0))
+        #y_avg_en = np.average(np.sum(np.square(y), axis=0))
+        #print u_avg_en, y_avg_en
         return (u, y)
 
     def calculate_accuracy(self, u, y):
-        if len(y.shape) == 2:
-            y = np.argmax(y, axis=0)
-
         # Training error
-        y_est = self.mdl.yest()
-        trn_acc = self.accuracy(y_est[:, :self.testset_size], y.T[:self.testset_size].T)
+        ut, yt = u[:, :self.testset_size], y.T[:self.testset_size].T
+        trn_acc = self.accuracy(self.mdl.estimate_y(ut, np.nan * yt), yt)
 
         # Validation error
-        (uv, yv) = self.get_data('val')
+        uv, yv = self.get_data('val')
         val_acc = self.accuracy(self.mdl.estimate_y(uv, np.nan * yv), yv)
         return (trn_acc, val_acc)
 

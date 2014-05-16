@@ -47,11 +47,11 @@ class MnistData(object):
         self.batch_size = batch_size
         self.testset_size = testset_size
         self.data = {
-            'trn': (np.float32(data[0][0]), np.int32(data[0][1])),
-            'val': (np.float32(data[1][0][:testset_size]),
-                    np.int32(data[1][1][:testset_size])),
-            'tst': (np.float32(data[2][0][:testset_size]),
-                    np.int32(data[2][1][:testset_size]))
+            'trn': [np.float32(data[0][0]), np.int32(data[0][1])],
+            'val': [np.float32(data[1][0][:testset_size]),
+                    np.int32(data[1][1][:testset_size])],
+            'tst': [np.float32(data[2][0][:testset_size]),
+                    np.int32(data[2][1][:testset_size])]
         }
         if normalize:
             for x, y in self.data.values():
@@ -64,29 +64,28 @@ class MnistData(object):
         batch_size = self.data[type][0].shape[0] if i is None else self.batch_size
         return ((self.data[type][0].shape[1], batch_size), (y_dim, batch_size))
 
-    def get(self, type, i=None, as_one_hot=False, limit=None):
+    def get(self, type, i=None, as_one_hot=False):
         """
         Returns a tuple (u, y) of i'th minibatch expanded into a one-hot coded vectors if necessary.
 
         E.g. 5 -> [0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
         """
         assert type in self.data.keys(), 'type has to be in %s' % str(self.data.keys())
-        assert i is None or (i + 1) * self.batch_size <= len(self.data[type][0])
         (u, y) = self.data[type]
 
-        batch_size = u.shape[0] if i is None else self.batch_size
-        batch_size = batch_size if limit is None else min(batch_size, limit)
         i = 0 if i is None else i
+        start = i * self.batch_size
+        end = min(u.shape[0], (i + 1) * self.batch_size)
 
-        u = u[(i * batch_size):((i + 1) * batch_size), :].T
+        u = u[start:end].T
 
         if not as_one_hot:
-            return (u, y[(i * batch_size):((i + 1) * batch_size)].T)
+            return (u, y[start:end].T)
 
         # Convert into one_hot presentation 2 -> [0, 0, 1, 0, ...]
         y_ = np.array(np.zeros(10))
-        y_[y[i * batch_size]] = 1.
-        for i in range(i * batch_size + 1, (i + 1) * batch_size):
+        y_[y[start]] = 1.
+        for i in range(start + 1, end):
             new = np.zeros(10)
             new[y[i]] = 1.
             y_ = np.vstack((y_, new))

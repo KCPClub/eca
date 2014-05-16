@@ -54,9 +54,9 @@ class Model(object):
         self.phi = theano.shared(rand_init.T, name='phi')
         self.child = None
         self.name = name
-        self.neg_feedforward = False
         self.missing_values = None
         self.parent = parent
+        self.custom_state_op = None
 
         if parent:
             assert parent.child is None
@@ -95,7 +95,7 @@ class Model(object):
             E_XX_update = (self.E_XX, E_XX_new)
             b = 1.
             d = T.diagonal(E_XX_new)
-            Q_new = theano.sandbox.linalg.ops.diag(b / T.where(d < 0.05, 0.05, d))
+            Q_new = theano.sandbox.linalg.ops.diag(b / T.where(d < 0.0005, 0.0005, d))
             Q_update = (self.Q, Q_new)
 
             # TODO: optional spatial neighborhood coupling
@@ -123,15 +123,12 @@ class Model(object):
             x = self.X[i]
             assert input is None or x.k == input.shape[1], "Sample size mismatch"
 
-            # If there is a layer following thise, get feedback
-            if self.child:
-                estimate = self.estimate(i)
-            else:
-                estimate = 0.
+            # Get estimate of the state from layer above
+            estimate = self.estimate(i)
 
             # Feedforward originates from previous layer's state or given input
             if input is None:
-                feedforward = T.dot(self.phi.T, self.parent.X[i].var)
+                feedforward = self.feedforward(i)
             else:
                 self.missing_values = theano.shared(np.float32(~np.isnan(input)), name='missings')
                 input[np.isnan(input)] = 0.0
@@ -146,7 +143,10 @@ class Model(object):
             if self.nonlin:
                 feedforward = self.nonlin(feedforward)
 
-            new_value = feedforward - estimate
+            if self.custom_state_op:
+                new_value = self.custom_state_op(feedforward, estimate)
+            else:
+                new_value = feedforward - estimate
 
             # If predicting missing values, force them to zero in residual so
             # that they don't influence learning
@@ -163,12 +163,17 @@ class Model(object):
             return self.update_state(i, input, tau)
 
     def estimate(self, i):
+        """ Ask the child for feedback and apply nonlinearity """
         if not self.child:
             return 0.0
-        return self.nonlin_est(self.child.feedback(i, self))
+        fb = self.child.feedback(i, self)
+        return self.nonlin_est(fb)
 
     def feedback(self, i, parent=None):
         return T.dot(self.phi, self.X[i].var)
+
+    def feedforward(self, i):
+        return T.dot(self.phi.T, self.parent.X[i].var)
 
     def info(self, str):
         if DEBUG_INFO:
@@ -185,16 +190,31 @@ class InputModel(Model):
 
 class CollisionModel(Model):
     def __init__(self, name, n, (parent1, parent2), nonlin=None):
-        self.m1 = Model(name + '1', n, parent1, nonlin)  # U
-        self.m2 = Model(name + '2', n, parent2, nonlin)  # Y
+        relu = lambda x: T.where(x < 0, 0, x)
+        self.u_side = Model(name + '1', n, parent1, lambda x: nonlin(x))
+        self.y_side = Model(name + '2', n, parent2, lambda x: nonlin(x))
+
+        # To make u and y update the same shared state, it must happen
+        # simultaneously, so route u to ask y for its feedback as an estimate.
+        self.u_side.estimate = lambda i: nonlin(self.y_side.feedforward(i))
+        self.u_side.custom_state_op = lambda fromu, fromy: (fromu + fromy)/2.
+        #self.u_side.custom_state_op = lambda fromu, fromy: fromu
+        #self.u_side.custom_state_op = lambda fromu, fromy: T.sqrt(fromu * fromy + 0.001)
+
+        # Disable state updates on the y side so that X is updated only once
+        self.y_side.update_state = lambda i, input, tau: 0.0
+
         self.n = n
         self.X = []
         self.name = name
-        self.phi = self.m1.phi # For visualization
+        self.phi = self.u_side.phi  # For visualization
 
     def update_model(self, i, tau):
-        self.m1.update_model(i, tau)
-        self.m2.update_model(i, tau)
+        self.u_side.update_model(i, tau)
+        self.y_side.update_model(i, tau)
+        # See what is contribution of u and y to the X
+        #print 'y sum', np.average(self.u_side.estimate(i).eval())
+        #print 'u sum', np.average(self.u_side.nonlin(self.u_side.feedforward(i)).eval())
 
         # TODO: Handle model update deltas
         return (0, 0)
@@ -205,13 +225,13 @@ class CollisionModel(Model):
     def delete_state(self):
         assert len(self.X) > 1, "Cannot delete default state"
         del self.X[-1]
-        del self.m1.state_update_f[len(self.X)]
-        del self.m2.state_update_f[len(self.X)]
+        del self.u_side.state_update_f[len(self.X)]
+        assert self.y_side.state_update_f is None
 
     def create_state(self, k):
         self.X.append(State(self.n, k))
-        self.m1.X = self.X
-        self.m2.X = self.X
+        self.u_side.X = self.X
+        self.y_side.X = self.X
         return len(self.X) - 1
 
     def get_feedback(self, i, parent=None):
@@ -316,6 +336,9 @@ class ECA(object):
         # First the input layer U
         self.l_U = InputModel('U', n_u)
         self.layers = layers = [self.l_U]
+        #self.l_U.nonlin_est = lambda x: T.eq(x, T.max(x, axis=0, keepdims=True))
+        #self.l_U.nonlin_est = lambda x : T.nnet.sigmoid(x)
+        #self.l_U.nonlin_est = nonlin
 
         # Then the consecutive layers U -> X_u1 -> X_u2 -> ...
         n_ulayers = n_layers[:-1] if n_y else n_layers
@@ -336,6 +359,8 @@ class ECA(object):
         # First the input layer Y
         self.l_Y = InputModel('Y', n_y)
         layers += [self.l_Y]
+        #self.l_Y.nonlin_est = lambda x: T.eq(x, T.max(x, axis=0, keepdims=True))
+        #self.l_Y.nonlin_est = lambda x : T.nnet.sigmoid(x)
 
         # Then add connecting layer to connect u and y branches:
         # ... -> X_uN -> Z
@@ -361,7 +386,7 @@ class ECA(object):
             l.update_model(i, tau)
 
     def update_states(self, i, u, y, tau):
-        max_diff = -1e100
+        max_diff = 1.0
 
         # Loop over net inputs
         for (x, val) in zip([self.l_U, self.l_Y], [u, y]):
@@ -372,13 +397,15 @@ class ECA(object):
                 val = None  # Only the first layer will have value in
 
                 # For convergence detection
-                max_diff = np.max([max_diff, np.average(np.abs(d))])
+                # Disabled because it was taking too much time on CPU
+                # Move to GPU!
+                #max_diff = np.max([max_diff, np.average(np.abs(d))])
         return max_diff
 
     def converge_state(self, i, u, y, tau):
         max_delta = 1.0
         iter = 0
-        (delta_limit, time_limit, iter_limit) = (1e-3, 20, 200)
+        (delta_limit, time_limit, iter_limit) = (1e-3, 20, 100)
         t_start = t.time()
         # Convergence condition, pretty arbitrary for now
         while max_delta > delta_limit and t.time() - t_start < time_limit:
@@ -386,9 +413,10 @@ class ECA(object):
             iter += 1
             if iter >= iter_limit:
                 break
-        print 'Converged in', "%.1f" % (t.time() - t_start), 's,', iter,
-        print 'iters, delta %.4f' % max_delta,
-        print 'Limits: i:', iter_limit, 't:', time_limit, 'd:', delta_limit
+        if False:
+            print 'Converged in', "%.1f" % (t.time() - t_start), 's,', iter,
+            print 'iters, delta %.4f' % max_delta,
+            print 'Limits: i:', iter_limit, 't:', time_limit, 'd:', delta_limit
 
     def converge(self, u, y, f):
         k = u.shape[1]
