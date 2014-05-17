@@ -122,7 +122,7 @@ class UnsupervisedLearning(TestCaseBase):
 
         # Validation error
         (uv, yv) = self.get_data('val')
-        y_est = self.mdl.estimate_u(uv, None)[-10:, :]
+        y_est = self.mdl.estimate_u(uv, None, 'validation')[-10:, :]
         val_acc = self.accuracy(y_est, yv)
         return (trn_acc, val_acc)
 
@@ -171,11 +171,11 @@ class SupervisedLearning(TestCaseBase):
     def calculate_accuracy(self, u, y):
         # Training error
         ut, yt = u[:, :self.testset_size], y.T[:self.testset_size].T
-        trn_acc = self.accuracy(self.mdl.estimate_y(ut, np.nan * yt), yt)
+        trn_acc = self.accuracy(self.mdl.estimate_y(ut, np.nan * yt, 'training_err'), yt)
 
         # Validation error
         uv, yv = self.get_data('val')
-        val_acc = self.accuracy(self.mdl.estimate_y(uv, np.nan * yv), yv)
+        val_acc = self.accuracy(self.mdl.estimate_y(uv, np.nan * yv, 'validation'), yv)
         return (trn_acc, val_acc)
 
     def visualize(self):
