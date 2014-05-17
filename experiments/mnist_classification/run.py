@@ -82,7 +82,7 @@ class TestCaseBase(object):
         y_est = y_est if len(y_est.shape) == 1 else np.argmax(y_est, axis=0)
         return float(np.bincount(y_est == y_true, minlength=2)[1]) / len(y_est)
 
-rect = lambda x: np.where(x < 0., 0., x)
+rect = lambda x: T.where(x < 0., 0., x)
 
 class UnsupervisedLearning(TestCaseBase):
     def configure(self):

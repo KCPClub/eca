@@ -226,7 +226,7 @@ class CollisionModel(Model):
         assert len(self.X) > 1, "Cannot delete default state"
         del self.X[-1]
         del self.u_side.state_update_f[len(self.X)]
-        assert self.y_side.state_update_f is None
+        assert self.y_side.state_update_f == {}
 
     def create_state(self, k):
         self.X.append(State(self.n, k))
