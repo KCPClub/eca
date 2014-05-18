@@ -189,8 +189,8 @@ class InputModel(Model):
 class CollisionModel(Model):
     def __init__(self, name, n, (parent1, parent2), nonlin=None):
         relu = lambda x: T.where(x < 0, 0, x)
-        self.u_side = Model(name + '1', n, parent1, lambda x: nonlin(x))
-        self.y_side = Model(name + '2', n, parent2, lambda x: nonlin(x))
+        self.u_side = Model(name + 'u', n, parent1, lambda x: nonlin(x))
+        self.y_side = Model(name + 'y', n, parent2, lambda x: nonlin(x))
 
         # To make u and y update the same shared state, it must happen
         # simultaneously, so route u to ask y for its feedback as an estimate.
