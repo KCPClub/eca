@@ -432,7 +432,7 @@ class ECA(object):
     def estimate_x(self, u, y, id):
         return self.converge(u, y, self.xest, id)
 
-    def xest(self, id='training'):
+    def xest(self, id='training', no_eval=False):
         """
         Finds the last latent presentation for classification. The last or one
         before collision or CCA.
@@ -441,13 +441,16 @@ class ECA(object):
         while l.child and not isinstance(l.child, CCAModel):
             l = l.child
         # Should this be Xbar or the feedforward ?
-        return l.X[id].var.get_value()
+        v = l.X[id].var
+        return v if no_eval else v.eval()
 
-    def uest(self, id='training'):
-        return self.l_U.estimate(id).eval()
+    def uest(self, id='training', no_eval=False):
+        v = self.l_U.estimate(id)
+        return v if no_eval else v.eval()
 
-    def yest(self, id='training'):
-        return self.l_Y.estimate(id).eval()
+    def yest(self, id='training', no_eval=False):
+        v = self.l_Y.estimate(id)
+        return v if no_eval else v.eval()
 
     def first_phi(self):
         # index is omitted for now, and the lowest layer is plotted
