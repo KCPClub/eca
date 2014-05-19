@@ -11,33 +11,33 @@ from utils import MnistData
 class TestCaseBase(object):
     def __init__(self):
         self.testset_size = 1000
-        self.data = MnistData(batch_size=100, testset_size=self.testset_size)
-        self.trn_iters = 400
+        self.data = MnistData(batch_size=1000, testset_size=self.testset_size)
+        self.trn_iters = 410
         self.mdl = None
         self.tau_start = None
         self.tau_end = None
         self.tau_alpha = None
+        self.tau_update = lambda tau: tau * self.tau_alpha + (1 - self.tau_alpha) * self.tau_end
 
         self.configure()
         assert self.mdl is not None
 
-        # This is global slowness that helps the model to get past the
-        # unstable beginning..
-        self.tau = self.tau_start
-        self.iter = 0
-        self.timestamp = time.time()
-        (u, y) = self.get_data('trn')
-        self.u, self.y = u, y
-
     def run(self):
         print 'Training...'
+        (u, y) = self.get_data('trn')
+        tau = self.tau_start
+        self.iter = 0
         try:
             for i in range(self.trn_iters):
-                self.run_iteration()
+                self.run_iteration(i, self.mdl, u, y, tau)
+                tau = self.tau_update(tau)
+                if self.iter % 200 == 0:
+                    self.print_accuracy(self.iter)
+                self.iter += 1
             print 'Testing accuracy...'
             # TODO: test error broken at the moment, trust validation as it is not used for
             # hyper-parameter tuning at the moment
-            #tst_acc = self.calculate_accuracy(ut, yt)
+            #tst_acc = self.calculate_accuracy()
             tst_acc = np.nan
             print "Accuracy: Training %6.2f %%, validation %6.2f %%, test %6.2f %%" % (
                 #100. * trn_acc,
@@ -47,38 +47,37 @@ class TestCaseBase(object):
         except KeyboardInterrupt:
             pass
 
-    def run_iteration(self):
-        u, y = self.u, self.y
+    def run_iteration(self, i, mdl, u, y, tau):
         t = time.time()
-        self.mdl.update(u, y, self.tau)
-        self.tau = self.tau * self.tau_alpha + (1 - self.tau_alpha) * self.tau_end
+        mdl.update(u, y, tau)
 
-        i_str = "I %4d:" % (self.iter)
         # Progress prings
-        if ((self.iter) % 20 == 0):
+        if ((i) % 20 == 0):
+            i_str = "I %4d:" % (i)
             t_str = 't: %.2f s' % (time.time() - t)
             t = time.time()
-            tau_str = "Tau: %4.1f" % self.tau
+            tau_str = "Tau: %4.1f" % tau
 
             tostr = lambda t: "{" + ", ".join(["%s: %6.2f" % (n, v) for (n, v) in t]) + "}"
 
-            var_str = " logvar:" + tostr(self.mdl.variance())
-            a_str   = " avg:   " + tostr(self.mdl.avg_levels())
-            phi_str = " |phi|: " + tostr(self.mdl.phi_norms())
+            var_str = " logvar:" + tostr(mdl.variance())
+            a_str   = " avg:   " + tostr(mdl.avg_levels())
+            phi_str = " |phi|: " + tostr(mdl.phi_norms())
 
             print i_str, tau_str, t_str, var_str, phi_str
             #print var_str, a_str, phi_str
             #print var_str, phi_str
 
+
+    def print_accuracy(self, i):
+        i_str = "I %4d:" % (i)
         # Accuracy prints
-        if ((self.iter) % 200 == 0):
-            t2 = time.time()
-            (trn_acc, val_acc) = self.calculate_accuracy(u, y)
-            t_str = 't: %.2f s,' % (time.time() - t2)
-            acc_str = "Accuracy trn %6.2f %%, val %6.2f %%" % (100. * trn_acc,
-                                                               100. * val_acc)
-            print i_str, acc_str, t_str
-        self.iter += 1
+        t2 = time.time()
+        (trn_acc, val_acc) = self.calculate_accuracy()
+        t_str = 't: %.2f s,' % (time.time() - t2)
+        acc_str = "Accuracy trn %6.2f %%, val %6.2f %%" % (100. * trn_acc,
+                                                           100. * val_acc)
+        print i_str, acc_str, t_str
 
     def configure(self):
         raise NotImplemented()
@@ -117,7 +116,8 @@ class UnsupervisedLearning(TestCaseBase):
             u = np.vstack((u, np.nan * np.zeros((10, u.shape[1]), dtype=np.float32)))
         return (u, y)
 
-    def calculate_accuracy(self, u, y):
+    def calculate_accuracy(self):
+        u, y = self.get_data('trn')
         if len(y.shape) == 2:
             y = np.argmax(y, axis=0)
 
@@ -152,6 +152,18 @@ class SupervisedLearning(TestCaseBase):
                        rect)  # T.tanh, rect, None, etc..
                        #lambda x: x)
 
+    def calculate_accuracy(self):
+        ut, yt = self.get_data('trn')
+        # Training error
+        ut, yt = u[:, :self.testset_size], y.T[:self.testset_size].T
+        trn_acc = self.accuracy(self.mdl.estimate_y(ut, np.nan * yt, 'training_err'), yt)
+
+        # Validation error
+        uv, yv = self.get_data('val')
+        val_acc = self.accuracy(self.mdl.estimate_y(uv, np.nan * yv, 'validation'), yv)
+
+        return (trn_acc, val_acc)
+
     def get_data(self, type):
         assert type in ['tst', 'trn', 'val']
 
@@ -174,23 +186,6 @@ class SupervisedLearning(TestCaseBase):
         #print u_avg_en, y_avg_en
         return (u, y)
 
-    def calculate_accuracy(self, u, y):
-        # Training error
-        ut, yt = u[:, :self.testset_size], y.T[:self.testset_size].T
-        trn_acc = self.accuracy(self.mdl.estimate_y(ut, np.nan * yt, 'training_err'), yt)
-
-        # Validation error
-        uv, yv = self.get_data('val')
-        val_acc = self.accuracy(self.mdl.estimate_y(uv, np.nan * yv, 'validation'), yv)
-
-        return (trn_acc, val_acc)
-
-    def visualize(self):
-        import matplotlib.pyplot as plt
-        import matplotlib.cm as cm
-        plt.imshow(rearrange_for_plot(self.mdl.first_phi()), cmap=cm.Greys_r)
-        plt.show()
-
 
 class SupervisedLearningGUI(SupervisedLearning):
     def run(self):
@@ -200,21 +195,35 @@ class SupervisedLearningGUI(SupervisedLearning):
         axes = self.axes = np.asarray(axes).flatten()
         fig.subplots_adjust(hspace=0.1)
 
-        # Run one iteration to create state
-        self.run_iteration()
 
         axes[0].set_title('phi_u')
         axes[1].set_title('trn(u, uest), tst(u, uest)')
         axes[2].set_title('generated digits 0 - 9')
         axes[3].set_title('trn(y, yest), tst(y, yest)')
+
+        # Run one iteration to create state
+        u, y = self.u, self.y = self.get_data('trn')
+        self.tau = self.tau_start
+        self.iter = 0
+
+        self.run_iteration(self.iter, self.mdl, u, y, self.tau)
         self.im = []
         for x in range(len(axes)):
             self.im += [axes[x].imshow(self.img(x),
                                        cmap=plt.get_cmap('gray'),
                                        interpolation='nearest')]
 
-        ani = animation.FuncAnimation(fig, self.updatefig, interval=50)
+        ani = animation.FuncAnimation(fig, self.updatefig, interval=50, fargs=(self.mdl, u, y))
+        self.iter = 0
         plt.show()
+
+    def updatefig(self, _, mdl, u, y, *args):
+        for i in range(20):
+            self.run_iteration(self.iter, mdl, u, y, self.tau)
+            self.tau = self.tau * self.tau_alpha + (1 - self.tau_alpha) * self.tau_end
+            self.iter += 1
+        [self.im[x].set_array(self.img(x)) for x in range(len(self.im))]
+        return self.im
 
     def img(self, i):
         arr = rearrange_for_plot
@@ -240,13 +249,7 @@ class SupervisedLearningGUI(SupervisedLearning):
         im /= np.max(im)
         return im
 
-    def updatefig(self, *args):
-        for i in range(20):
-            self.run_iteration()
-        [self.im[x].set_array(self.img(x)) for x in range(len(self.im))]
-        return self.im
-
-    def calculate_accuracy(self, u, y):
+    def calculate_accuracy(self):
         uv, yv = self.get_data('val')
 
         uest = self.mdl.estimate_u(
@@ -273,15 +276,74 @@ class SupervisedLearningGUI(SupervisedLearning):
             y_est = np.array(y_est).T
             print 'Training error by classifying based on reconstruction error',
             print self.accuracy(y_est, yv)
+        return super(SupervisedLearningGUI, self).calculate_accuracy()
 
-        return super(SupervisedLearningGUI, self).calculate_accuracy(u, y)
 
+class MultiModelLearning(UnsupervisedLearning):
+
+    def configure(self):
+        layers = [30]
+        self.tau_start = 20
+        self.tau_end = 5
+        self.tau_alpha = 0.99
+        self.mdl = []
+        for i in range(10):
+            self.mdl += [
+                ECA(layers, self.data.size('trn', 0)[0][0], 0,
+                    #T.tanh)  # T.tanh, rect, None, etc..
+                    #lambda x: x)
+                    rect)  # T.tanh, rect, None, etc..
+            ]
+
+    def run(self):
+        print 'Training...'
+        u, y = self.get_data('trn')
+        tau = self.tau_start
+        print u.shape, y.shape
+        try:
+            for iter in range(self.trn_iters):
+                for i in range(10):
+                    # Show only samples belonging to a class
+                    self.run_iteration(iter, self.mdl[i], u[:, y == i], None, tau)
+                if (iter + 50) % 100 == 0:
+                    self.print_accuracy(iter)
+                tau = self.tau_update(tau)
+        except KeyboardInterrupt:
+            pass
+
+    def get_data(self, type):
+        assert type in ['tst', 'trn', 'val']
+        return self.data.get(type, i=0, as_one_hot=False)
+
+    def calculate_accuracy(self):
+        # Training error
+        u, y = self.get_data('trn')
+        r = []
+        for i in range(10):
+            u_est = self.mdl[i].estimate_u(u, None, 'training_err') * 2
+            reconst_mse = np.average(np.square(u_est - u), axis=0)
+            r += [reconst_mse]
+        y_est = -np.array(r)
+        trn_acc = self.accuracy(y_est[:, :self.testset_size],
+                                y.T[:self.testset_size].T)
+
+        # Validation error
+        u, y = self.get_data('val')
+        r = []
+        for i in range(10):
+            u_est = self.mdl[i].estimate_u(u, None, 'validation') * 2
+            reconst_mse = np.average(np.square(u_est - u), axis=0)
+            r += [reconst_mse]
+        y_est = -np.array(r)
+        val_acc = self.accuracy(y_est, y)
+        return (trn_acc, val_acc)
 
 def main():
     print 'Initializing...'
     #o = UnsupervisedLearning()
     #o = SupervisedLearningGUI()
-    o = SupervisedLearning()
+    #o = SupervisedLearning()
+    o = MultiModelLearning()
     o.run()
 
 if __name__ == '__main__':

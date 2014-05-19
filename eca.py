@@ -470,7 +470,7 @@ class ECA(object):
 
     def phi_norms(self):
         f = lambda l: (l.name, np.average(np.linalg.norm(l.phi.get_value(), axis=0)))
-        return map(f, self.layers)
+        return map(f, list(set(self.layers) - set([self.l_U, self.l_Y])))
 
     def reconstruction_error(self):
         # TODO
