@@ -2,6 +2,7 @@ import numpy as np
 import time as t
 import theano
 import theano.tensor as T
+from theano.sandbox.cuda import cuda_ndarray
 DEBUG_INFO = False
 FLOATX = theano.config.floatX
 
@@ -13,6 +14,8 @@ def lerp(t, old, new):
     return ((1 - 1 / t) * old + 1 / t * new,
             (old - new) / (old + 1e-10))
 
+def free_mem():
+    return cuda_ndarray.cuda_ndarray.mem_info()[0] / 1024 / 1024
 
 class State(object):
     """ Object that represents any kind of state U, X, X_y, z, ...
