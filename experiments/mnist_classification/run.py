@@ -11,7 +11,7 @@ from utils import MnistData
 class TestCaseBase(object):
     def __init__(self):
         self.testset_size = 1000
-        self.data = MnistData(batch_size=1000, testset_size=self.testset_size)
+        self.data = MnistData(batch_size=1000, testset_size=self.testset_size, normalize=False)
         self.trn_iters = 410
         self.mdl = None
         self.tau_start = None
@@ -91,14 +91,15 @@ rect = lambda x: T.where(x < 0., 0., x)
 
 class UnsupervisedLearning(TestCaseBase):
     def configure(self):
-        layers = [20]  # Try e.g. [30, 20] for multiple layers and increase tau start
+        layers = [600]  # Try e.g. [30, 20] for multiple layers and increase tau start
         self.tau_start = 30
+        self.trn_iters = 1610
         self.tau_end = 5
         self.tau_alpha = 0.99
         self.mdl = ECA(layers,
                        self.data.size('trn', 0)[0][0] + 10,
                        0,  # n of output
-                       T.abs_)  # np.tanh, rect, None, etc..
+                       rect)  # np.tanh, rect, None, etc..
 
 
     def get_data(self, type):
@@ -113,7 +114,7 @@ class UnsupervisedLearning(TestCaseBase):
         if type == 'trn':
             u = np.vstack([u, y])
         else:
-            u = np.vstack((u, np.nan * np.zeros((10, u.shape[1]), dtype=np.float32)))
+            u = np.vstack((u, np.float32(np.nan * np.zeros((10, u.shape[1])))))
         return (u, y)
 
     def calculate_accuracy(self):
@@ -141,8 +142,9 @@ class UnsupervisedLearning(TestCaseBase):
 
 class SupervisedLearning(TestCaseBase):
     def configure(self):
-        layers = [100]  # Try e.g. [30, 20] for multiple layers and increase tau start
-        self.tau_start = 20
+        layers = [300]  # Try e.g. [30, 20] for multiple layers and increase tau start
+        self.trn_iters = 1610
+        self.tau_start = 50
         self.tau_end = 5
         self.tau_alpha = 0.99
         self.mdl = ECA(layers,
@@ -153,14 +155,13 @@ class SupervisedLearning(TestCaseBase):
                        #lambda x: x)
 
     def calculate_accuracy(self):
-        ut, yt = self.get_data('trn')
         # Training error
-        ut, yt = u[:, :self.testset_size], y.T[:self.testset_size].T
-        trn_acc = self.accuracy(self.mdl.estimate_y(ut, np.nan * yt, 'training_err'), yt)
+        ut, yt = self.get_data('trn')
+        trn_acc = self.accuracy(self.mdl.estimate_y(ut, np.float32(np.nan * yt), 'training_err'), yt)
 
         # Validation error
         uv, yv = self.get_data('val')
-        val_acc = self.accuracy(self.mdl.estimate_y(uv, np.nan * yv, 'validation'), yv)
+        val_acc = self.accuracy(self.mdl.estimate_y(uv, np.float32(np.nan * yv), 'validation'), yv)
 
         return (trn_acc, val_acc)
 
@@ -280,34 +281,57 @@ class SupervisedLearningGUI(SupervisedLearning):
 
 
 class MultiModelLearning(UnsupervisedLearning):
-
     def configure(self):
-        layers = [30]
-        self.tau_start = 20
+        self.layers = [600]
+        self.trn_iters = 600
+        self.tau_start = 30
         self.tau_end = 5
         self.tau_alpha = 0.99
         self.mdl = []
-        for i in range(10):
-            self.mdl += [
-                ECA(layers, self.data.size('trn', 0)[0][0], 0,
-                    #T.tanh)  # T.tanh, rect, None, etc..
-                    #lambda x: x)
-                    rect)  # T.tanh, rect, None, etc..
-            ]
 
     def run(self):
         print 'Training...'
-        u, y = self.get_data('trn')
-        tau = self.tau_start
-        print u.shape, y.shape
         try:
-            for iter in range(self.trn_iters):
-                for i in range(10):
-                    # Show only samples belonging to a class
-                    self.run_iteration(iter, self.mdl[i], u[:, y == i], None, tau)
-                if (iter + 50) % 100 == 0:
-                    self.print_accuracy(iter)
-                tau = self.tau_update(tau)
+            err_trn = []
+            err_val = []
+            self.mdl = None
+            for i in range(10):
+                tau = self.tau_start
+                u, y = self.get_data('trn')
+                print 'Training model for class', i
+                if self.mdl:
+                    del self.mdl
+                self.mdl = ECA(self.layers, self.data.size('trn', 0)[0][0], 0,
+                               #T.tanh)
+                               #lambda x: x)
+                               rect)
+                # Show only samples belonging to a class
+                inp = u[:, y == i]
+                for iter in range(self.trn_iters):
+                    self.run_iteration(iter, self.mdl, inp, None, tau)
+                    tau = self.tau_update(tau)
+
+                print 'Calculating reconstruction errors...'
+                print 'Average error for training set',
+                print np.average(self.mdl.reconst_err_u(inp, None, 'training'))
+                print 'Average error other numbers',
+                print np.average(self.mdl.reconst_err_u(u[:, y != i], None, 'training'))
+                print 'Average error for validation',
+                uv, yv = self.get_data('val')
+                print np.average(self.mdl.reconst_err_u(uv[:, yv == i], None, 'training'))
+                uv, yv = self.get_data('val')
+
+                # TODO: correct labels to 'validation' etc. This is for memory saving reasons.
+                err_trn += [self.mdl.reconst_err_u(u, None, 'training')]
+                uv, yv = self.get_data('val')
+                err_val += [self.mdl.reconst_err_u(uv, None, 'training')]
+                assert not np.any(np.isnan(err_val))
+            # Estimate is the negative of the reconstruction error
+            trn_acc = self.accuracy(-np.array(err_trn), y)
+            val_acc = self.accuracy(-np.array(err_val), yv)
+
+            print "Accuracy trn %6.2f %%, val %6.2f %%" % (100. * trn_acc,
+                                                           100. * val_acc)
         except KeyboardInterrupt:
             pass
 
@@ -318,24 +342,16 @@ class MultiModelLearning(UnsupervisedLearning):
     def calculate_accuracy(self):
         # Training error
         u, y = self.get_data('trn')
-        r = []
-        for i in range(10):
-            u_est = self.mdl[i].estimate_u(u, None, 'training_err') * 2
-            reconst_mse = np.average(np.square(u_est - u), axis=0)
-            r += [reconst_mse]
         y_est = -np.array(r)
         trn_acc = self.accuracy(y_est[:, :self.testset_size],
                                 y.T[:self.testset_size].T)
 
         # Validation error
-        u, y = self.get_data('val')
         r = []
         for i in range(10):
             u_est = self.mdl[i].estimate_u(u, None, 'validation') * 2
             reconst_mse = np.average(np.square(u_est - u), axis=0)
             r += [reconst_mse]
-        y_est = -np.array(r)
-        val_acc = self.accuracy(y_est, y)
         return (trn_acc, val_acc)
 
 def main():
