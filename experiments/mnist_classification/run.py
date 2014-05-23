@@ -50,7 +50,6 @@ class TestCaseBase(object):
     def run_iteration(self, i, mdl, u, y, stiff):
         t = time.time()
         d = mdl.update(u, y, stiff)
-        print d
 
         # Progress prings
         if ((i) % 20 == 0):
@@ -69,7 +68,6 @@ class TestCaseBase(object):
             phi_zero_str = " |phin0|: " + tostr(map(lambda a: (a[0], np.sum(np.isclose(a[1], 0.0, atol=0.5))), phi_norms))
             phi_str = " |phi|: " + tostr(map(lambda a: (a[0], np.average(a[1])), phi_norms))
             E_str = " E: " + tostr(mdl.energy())
-            L_str = " L: " + tostr(mdl.units_alive())
 
             print i_str, stiff_str, t_str, E_str, phi_ones_str, phi_zero_str, phi_larg_str
             #print var_str, a_str, phi_str

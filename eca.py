@@ -1,8 +1,7 @@
 import numpy as np
-import time as t
+from time import time
 import theano
 import theano.tensor as T
-from theano.sandbox.cuda import cuda_ndarray
 DEBUG_INFO = False
 FLOATX = theano.config.floatX
 
@@ -21,6 +20,7 @@ def lerp(old, new, min_tau=0.0):
             t, rel_diff)
 
 def free_mem():
+    from theano.sandbox.cuda import cuda_ndarray
     return cuda_ndarray.cuda_ndarray.mem_info()[0] / 1024 / 1024
 
 class State(object):
@@ -138,10 +138,12 @@ class Model(object):
             # Feedforward originates from previous layer's state or given input
             if input is None:
                 feedforward = self.feedforward(id)
+                has_missing_values = 0.0
             else:
                 input_t = T.matrix('input', dtype=FLOATX)
                 inputs += [input_t]
-                missing_values = T.cast(T.isnan(input_t), FLOATX)
+                missing_values = T.isnan(input_t)
+                has_missing_values = T.any(missing_values)
                 input_t = T.where(T.isnan(input_t), 0.0, input_t)
                 feedforward = input_t
 
@@ -412,15 +414,15 @@ class ECA(object):
         max_delta = 1.0
         iter = 0
         (delta_limit, time_limit, iter_limit) = (1e-3, 20, 200)
-        t_start = t.time()
+        t_start = time()
         # Convergence condition, pretty arbitrary for now
-        while max_delta > delta_limit and t.time() - t_start < time_limit:
+        while max_delta > delta_limit and time() - t_start < time_limit:
             max_delta = self.update_states(id, u, y, min_tau)
             iter += 1
             if iter >= iter_limit:
                 break
         if False:
-            print 'Converged in', "%.1f" % (t.time() - t_start), 's,', iter,
+            print 'Converged in', "%.1f" % (time() - t_start), 's,', iter,
             print 'iters, delta %.4f' % max_delta,
             print 'Limits: i:', iter_limit, 't:', time_limit, 'd:', delta_limit
 
