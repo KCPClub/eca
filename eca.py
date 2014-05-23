@@ -7,12 +7,18 @@ DEBUG_INFO = False
 FLOATX = theano.config.floatX
 
 
-def lerp(t, old, new):
+def lerp(old, new, min_tau=0.0):
     """
     Return new interpolated value and a relative difference
     """
+    diff = T.mean(T.sqr(new) - T.sqr(old), axis=1, keepdims=True)
+    rel_diff = diff / (T.mean(T.sqr(old), axis=1, keepdims=True) + 1e-5)
+    t = rel_diff * 20.
+    t = T.where(t < 5, 5, t)
+    t = T.where(t > 100, 100, t)
+    t = t + min_tau
     return ((1 - 1 / t) * old + 1 / t * new,
-            (old - new) / (old + 1e-10))
+            t, rel_diff)
 
 def free_mem():
     return cuda_ndarray.cuda_ndarray.mem_info()[0] / 1024 / 1024
@@ -75,9 +81,9 @@ class Model(object):
             self.delete_state(id)
         self.X[id] = State(self.n, k)
 
-    def update_model(self, id, tau):
+    def update_model(self, id, stiffness):
         if id in self.model_update_f:
-            return self.model_update_f[id](tau)
+            return self.model_update_f[id](stiffness)
         else:
             x = self.X[id]
             x_prev = self.parent.X[id]
@@ -85,26 +91,25 @@ class Model(object):
             assert x_prev.n == self.m, "Input dim mismatch"
             assert x.n == self.n, "Output dim mismatch"
             k = np.float32(x.k)
-            tau_in = T.scalar('tau', dtype=FLOATX)
-            (E_XU_new, d1) = lerp(tau_in,
-                                  self.E_XU,
-                                  T.dot(x.var, x_prev.var.T) / k)
-            (E_XX_new, d2) = lerp(tau_in,
-                                  self.E_XX,
-                                  T.dot(x.var, x.var.T) / k)
+            (E_XU_new, t, d1) = lerp(self.E_XU,
+                                     T.dot(x.var, x_prev.var.T) / k)
+            (E_XX_new, t, d2) = lerp(self.E_XX,
+                                     T.dot(x.var, x.var.T) / k)
             E_XU_update = (self.E_XU, E_XU_new)
             E_XX_update = (self.E_XX, E_XX_new)
             b = 1.
             d = T.diagonal(E_XX_new)
-            Q_new = theano.sandbox.linalg.ops.diag(b / T.where(d < 0.05, 0.05, d))
+            stiff = T.scalar('stiffnes', dtype=FLOATX)
+            Q_new = theano.sandbox.linalg.ops.diag(b / T.where(d < stiff, stiff, d))
             Q_update = (self.Q, Q_new)
 
             # TODO: optional spatial neighborhood coupling
             phi_update = (self.phi, T.dot(Q_new, E_XU_new).T)
 
+            d = T.maximum(T.max(d1), T.max(d2))
             self.model_update_f[id] = theano.function(
-                inputs=[tau_in],
-                outputs=[d1, d2],
+                inputs=[stiff],
+                outputs=d,
                 updates=[E_XU_update, E_XX_update, Q_update, phi_update])
 
             self.info('Model update between ' + self.name + ' and ' + self.parent.name)
@@ -113,15 +118,16 @@ class Model(object):
                       #'avg phi col norm %.2f' % np.average(np.sqrt(np.sum(np.square(self.phi),
                                                                            #axis=0))))
             # Call self now that we have the function set
-            return self.update_model(id, tau)
+            return self.update_model(id, stiffness)
 
 
-    def update_state(self, id, input, tau):
+    def update_state(self, id, input, min_tau=0.0):
+        min_tau = 0.0
         if id in self.state_update_f:
-            args = (tau,) if input is None else (tau, input)
+            args = (min_tau,) if input is None else (min_tau, input)
             return self.state_update_f[id](*args)
         else:
-            tau_in = T.scalar('tau', dtype=FLOATX)
+            tau_in = T.scalar('min_tau', dtype=FLOATX)
             inputs = [tau_in]
             x = self.X[id]
             assert input is None or x.k == input.shape[1], "Sample size mismatch"
@@ -154,17 +160,18 @@ class Model(object):
 
             # If predicting missing values, force them to zero in residual so
             # that they don't influence learning
-            if self.missing_values is not None:
-                new_value = new_value * self.missing_values
+            if has_missing_values:
+                new_value = T.where(missing_values, 0.0, new_value)
 
-            (new_X, d) = lerp(tau_in, x.var, new_value)
+            (new_X, t, d) = lerp(x.var, new_value, tau_in)
+            d = T.max(d)
 
             self.state_update_f[id] = theano.function(
                 inputs=inputs,
-                outputs=[d],
+                outputs=d,
                 updates=[(x.var, new_X)])
 
-            return self.update_state(id, input, tau)
+            return self.update_state(id, input, min_tau)
 
     def estimate(self, id):
         """ Ask the child for feedback and apply nonlinearity """
@@ -188,8 +195,8 @@ class InputModel(Model):
     def __init__(self, name, n):
         super(InputModel, self).__init__(name,  n, None, None, True)
 
-    def update_model(self, id, tau):
-        pass
+    def update_model(self, id, stiffness):
+        return 0.0
 
 
 class CollisionModel(Model):
@@ -207,24 +214,19 @@ class CollisionModel(Model):
         #self.u_side.custom_state_op = lambda fromu, fromy: T.sqrt(fromu * fromy + 0.1)
 
         # Disable state updates on the y side so that X is updated only once
-        self.y_side.update_state = lambda i, input, tau: 0.0
+        self.y_side.update_state = lambda i, input, min_tau: 0.0
 
         self.n = n
         self.X = {}
         self.name = name
         self.phi = self.u_side.phi  # For visualization
 
-    def update_model(self, id, tau):
-        self.u_side.update_model(id, tau)
-        self.y_side.update_model(id, tau)
-        # See what is contribution of u and y to the X
-        #print 'y sum', np.average(self.u_side.estimate(id).eval())
-        #print 'u sum', np.average(self.u_side.nonlin(self.u_side.feedforward(id)).eval())
+    def update_model(self, id, stiffness):
+        d1 = self.u_side.update_model(id, stiffness)
+        d2 = self.y_side.update_model(id, stiffness)
+        return np.maximum(d1, d2)
 
-        # TODO: Handle model update deltas
-        return (0, 0)
-
-    def update_state(self, id, input, tau):
+    def update_state(self, id, input, min_tau):
         assert False, 'should be never called'
 
     def delete_state(self, id):
@@ -252,11 +254,11 @@ class CCAModel(Model):
         # Phi of this layer is not in use, mark it as nan
         self.phi = np.zeros((1, 1))
 
-    def update_model(self, id, tau):
+    def update_model(self, id, stiffness):
         """ There is no global model state for CCA layer, instead, everything
         happens in update_state
         """
-        return
+        return 0.0
 
     def create_state(self, k):
         # Create a stack of E_ZZ in addition to base class implementation
@@ -267,7 +269,7 @@ class CCAModel(Model):
         del self.E_ZZ[id]
         return super(CCAModel, self).delete_state(id)
 
-    def update_state(self, id, input, tau):
+    def update_state(self, id, input, min_tau):
         z = self.X[id]
         E_ZZ = self.E_ZZ[id]
         assert input is None, "CCA state cannot use input"
@@ -276,8 +278,7 @@ class CCAModel(Model):
         assert z.n == self.n, "Output dim mismatch"
 
         # Update state-specific E_ZZ and calculate q for z update
-        (E_ZZ.value, di) = lerp(tau * 3.,
-                                E_ZZ.value,
+        (E_ZZ.value, di) = lerp(E_ZZ.value,
                                 np.dot(z.value, z.value.T) / z.k)
         assert E_ZZ.value.shape == (1, 1), 'E_ZZ is not a scalar!?'
         b = 1.
@@ -287,7 +288,7 @@ class CCAModel(Model):
         [x1, x2] = [self.parent[j].X[id].value for j in (0, 1)]
         new_value = q * np.sum(x1 * x2, axis=0)
 
-        (z.value, dz) = lerp(tau, z.value, new_value)
+        (z.value, dz) = lerp(z.value, new_value)
 
         self.E_XU = None
         return np.max((np.abs(di), np.average(np.abs(dz))))
@@ -374,7 +375,7 @@ class ECA(object):
         cl = CollisionModel('Z', n_layers[-1], (layers[-2], layers[-1]), nonlin)
         layers += [cl]
 
-    def update(self, u, y, tau):
+    def update(self, u, y, stiffness):
         """
         Performs update round-trip from u to X and back.
         """
@@ -383,38 +384,38 @@ class ECA(object):
             for l in self.layers:
                 l.create_state(u.shape[1], 'training')
 
-        self.update_states('training', u, y, tau)
-        self.update_models('training', tau)
+        self.update_states('training', u, y)
+        d = self.update_models('training', stiffness)
+        return d
 
-    def update_models(self, id, tau):
+    def update_models(self, id, stiffness):
+        max_delta = 0.0
         for l in self.layers:
-            l.update_model(id, tau)
+            d = l.update_model(id, stiffness)
+            max_delta = np.maximum(d, max_delta)
+        return max_delta
 
-    def update_states(self, id, u, y, tau):
-        max_diff = 1.0
+    def update_states(self, id, u, y, min_tau=0.0):
+        max_diff = 0.0
 
         # Loop over net inputs
         for (x, val) in zip([self.l_U, self.l_Y], [u, y]):
             # Loop through the chain of layers
             while x:
-                d = x.update_state(id, val, tau)
+                d = x.update_state(id, val, min_tau)
                 x = x.child
                 val = None  # Only the first layer will have value in
-
-                # For convergence detection
-                # Disabled because it was taking too much time on CPU
-                # Move to GPU!
-                #max_diff = np.max([max_diff, np.average(np.abs(d))])
+                max_diff = max(d, max_diff)
         return max_diff
 
-    def converge_state(self, id, u, y, tau):
+    def converge_state(self, id, u, y, min_tau=0.0):
         max_delta = 1.0
         iter = 0
         (delta_limit, time_limit, iter_limit) = (1e-3, 20, 200)
         t_start = t.time()
         # Convergence condition, pretty arbitrary for now
         while max_delta > delta_limit and t.time() - t_start < time_limit:
-            max_delta = self.update_states(id, u, y, tau)
+            max_delta = self.update_states(id, u, y, min_tau)
             iter += 1
             if iter >= iter_limit:
                 break
@@ -427,7 +428,7 @@ class ECA(object):
         k = u.shape[1]
         for l in self.layers:
             l.create_state(k, id)
-        self.converge_state(id, u, y, 10.)
+        self.converge_state(id, u, y)
 
         return f(id)
 
@@ -472,8 +473,8 @@ class ECA(object):
         f = lambda l: (l.name, l.X['training'].variance())
         return map(f, self.layers)
 
-    def energy(self):
-        f = lambda l: (l.name, np.diagonal(l.E_XX.get_value()))
+    def energy(self, id='training'):
+        f = lambda l: (l.name, np.average(l.X[id].energy()))
         return map(f, self.layers)
 
     def avg_levels(self):
@@ -481,5 +482,5 @@ class ECA(object):
         return map(f, self.layers)
 
     def phi_norms(self):
-        f = lambda l: (l.name, np.average(np.linalg.norm(l.phi.get_value(), axis=0)))
+        f = lambda l: (l.name, (np.linalg.norm(l.phi.get_value(), axis=0)))
         return map(f, list(set(self.layers) - set([self.l_U, self.l_Y])))

@@ -14,10 +14,10 @@ class TestCaseBase(object):
         self.data = MnistData(batch_size=1000, testset_size=self.testset_size, normalize=False)
         self.trn_iters = 410
         self.mdl = None
-        self.tau_start = None
-        self.tau_end = None
-        self.tau_alpha = None
-        self.tau_update = lambda tau: tau * self.tau_alpha + (1 - self.tau_alpha) * self.tau_end
+        self.stiff_start = None
+        self.stiff_end = None
+        self.stiff_alpha = None
+        self.stiff_update = lambda s : s * self.stiff_alpha + (1 - self.stiff_alpha) * self.stiff_end
 
         self.configure()
         assert self.mdl is not None
@@ -25,12 +25,12 @@ class TestCaseBase(object):
     def run(self):
         print 'Training...'
         (u, y) = self.get_data('trn')
-        tau = self.tau_start
+        stiff = self.stiff_start
         self.iter = 0
         try:
             for i in range(self.trn_iters):
-                self.run_iteration(i, self.mdl, u, y, tau)
-                tau = self.tau_update(tau)
+                self.run_iteration(i, self.mdl, u, y, stiff)
+                stiff = self.stiff_update(stiff)
                 if self.iter % 200 == 0:
                     self.print_accuracy(self.iter)
                 self.iter += 1
@@ -47,24 +47,31 @@ class TestCaseBase(object):
         except KeyboardInterrupt:
             pass
 
-    def run_iteration(self, i, mdl, u, y, tau):
+    def run_iteration(self, i, mdl, u, y, stiff):
         t = time.time()
-        mdl.update(u, y, tau)
+        d = mdl.update(u, y, stiff)
+        print d
 
         # Progress prings
         if ((i) % 20 == 0):
             i_str = "I %4d:" % (i)
             t_str = 't: %.2f s' % (time.time() - t)
             t = time.time()
-            tau_str = "Tau: %4.1f" % tau
+            stiff_str = "stiff: %5.3f" % stiff
 
             tostr = lambda t: "{" + ", ".join(["%s: %6.2f" % (n, v) for (n, v) in t]) + "}"
 
             var_str = " logvar:" + tostr(mdl.variance())
             a_str   = " avg:   " + tostr(mdl.avg_levels())
-            phi_str = " |phi|: " + tostr(mdl.phi_norms())
+            phi_norms = mdl.phi_norms()
+            phi_larg_str = " |phinL|: " + tostr(map(lambda a: (a[0], np.sum(a[1] > 1.1)), phi_norms))
+            phi_ones_str = " |phin1|: " + tostr(map(lambda a: (a[0], np.sum(np.isclose(a[1], 1.0, atol=0.1))), phi_norms))
+            phi_zero_str = " |phin0|: " + tostr(map(lambda a: (a[0], np.sum(np.isclose(a[1], 0.0, atol=0.5))), phi_norms))
+            phi_str = " |phi|: " + tostr(map(lambda a: (a[0], np.average(a[1])), phi_norms))
+            E_str = " E: " + tostr(mdl.energy())
+            L_str = " L: " + tostr(mdl.units_alive())
 
-            print i_str, tau_str, t_str, var_str, phi_str
+            print i_str, stiff_str, t_str, E_str, phi_ones_str, phi_zero_str, phi_larg_str
             #print var_str, a_str, phi_str
             #print var_str, phi_str
 
@@ -92,10 +99,10 @@ rect = lambda x: T.where(x < 0., 0., x)
 class UnsupervisedLearning(TestCaseBase):
     def configure(self):
         layers = [600]  # Try e.g. [30, 20] for multiple layers and increase tau start
-        self.tau_start = 30
+        self.stiff_start = 0.5
+        self.stiff_end = 0.005
+        self.stiff_alpha = 0.99
         self.trn_iters = 1610
-        self.tau_end = 5
-        self.tau_alpha = 0.99
         self.mdl = ECA(layers,
                        self.data.size('trn', 0)[0][0] + 10,
                        0,  # n of output
@@ -142,11 +149,11 @@ class UnsupervisedLearning(TestCaseBase):
 
 class SupervisedLearning(TestCaseBase):
     def configure(self):
-        layers = [300]  # Try e.g. [30, 20] for multiple layers and increase tau start
+        layers = [300]
         self.trn_iters = 1610
-        self.tau_start = 50
-        self.tau_end = 5
-        self.tau_alpha = 0.99
+        self.stiff_start = 0.5
+        self.stiff_end = 0.005
+        self.stiff_alpha = 0.99
         self.mdl = ECA(layers,
                        self.data.size('trn', 0)[0][0],
                        self.data.size('trn', 0, as_one_hot=True)[1][0],
@@ -204,10 +211,10 @@ class SupervisedLearningGUI(SupervisedLearning):
 
         # Run one iteration to create state
         u, y = self.u, self.y = self.get_data('trn')
-        self.tau = self.tau_start
+        self.stiff = self.stiff_start
         self.iter = 0
 
-        self.run_iteration(self.iter, self.mdl, u, y, self.tau)
+        self.run_iteration(self.iter, self.mdl, u, y, self.stiff)
         self.im = []
         for x in range(len(axes)):
             self.im += [axes[x].imshow(self.img(x),
@@ -220,8 +227,8 @@ class SupervisedLearningGUI(SupervisedLearning):
 
     def updatefig(self, _, mdl, u, y, *args):
         for i in range(20):
-            self.run_iteration(self.iter, mdl, u, y, self.tau)
-            self.tau = self.tau * self.tau_alpha + (1 - self.tau_alpha) * self.tau_end
+            self.run_iteration(self.iter, mdl, u, y, self.stiff)
+            self.stiff = self.stiff * self.stiff_alpha + (1 - self.stiff_alpha) * self.stiff_end
             self.iter += 1
         [self.im[x].set_array(self.img(x)) for x in range(len(self.im))]
         return self.im
@@ -283,10 +290,10 @@ class SupervisedLearningGUI(SupervisedLearning):
 class MultiModelLearning(UnsupervisedLearning):
     def configure(self):
         self.layers = [600]
-        self.trn_iters = 600
-        self.tau_start = 30
-        self.tau_end = 5
-        self.tau_alpha = 0.99
+        self.trn_iters = 410
+        self.stiff_start = 0.5
+        self.stiff_end = 0.005
+        self.stiff_alpha = 0.95
         self.mdl = []
 
     def run(self):
@@ -296,7 +303,7 @@ class MultiModelLearning(UnsupervisedLearning):
             err_val = []
             self.mdl = None
             for i in range(10):
-                tau = self.tau_start
+                stiff = self.stiff_start
                 u, y = self.get_data('trn')
                 print 'Training model for class', i
                 if self.mdl:
@@ -308,8 +315,8 @@ class MultiModelLearning(UnsupervisedLearning):
                 # Show only samples belonging to a class
                 inp = u[:, y == i]
                 for iter in range(self.trn_iters):
-                    self.run_iteration(iter, self.mdl, inp, None, tau)
-                    tau = self.tau_update(tau)
+                    self.run_iteration(iter, self.mdl, inp, None, stiff)
+                    stiff = self.stiff_update(stiff)
 
                 print 'Calculating reconstruction errors...'
                 print 'Average error for training set',
