@@ -6,7 +6,7 @@ DEBUG_INFO = False
 FLOATX = theano.config.floatX
 
 
-def lerp(old, new, min_tau=0.0):
+def lerp(old, new, min_tau=0.0, en=None):
     """
     Return new interpolated value and a relative difference
     """
@@ -16,7 +16,11 @@ def lerp(old, new, min_tau=0.0):
     t = T.where(t < 5, 5, t)
     t = T.where(t > 100, 100, t)
     t = t + min_tau
-    return ((1 - 1 / t) * old + 1 / t * new,
+    if en is not None:
+        lmbd = T.diagonal(en).dimshuffle(0, 'x') * (1. / t)
+    else:
+        lmbd = 1. / t
+    return ((1 - lmbd) * old + lmbd * new,
             t, rel_diff)
 
 def free_mem():
@@ -45,6 +49,7 @@ class Model(object):
         rng = np.random.RandomState(0)
         self.n = n
         self.m = m
+        self.en = theano.shared(np.identity(n, dtype=FLOATX), name='enabled')
         self.model_update_f = {}
         self.state_update_f = {}
         self.nonlin = nonlin
@@ -92,9 +97,11 @@ class Model(object):
             assert x.n == self.n, "Output dim mismatch"
             k = np.float32(x.k)
             (E_XU_new, t, d1) = lerp(self.E_XU,
-                                     T.dot(x.var, x_prev.var.T) / k)
+                                     T.dot(x.var, x_prev.var.T) / k,
+                                     en=self.en)
             (E_XX_new, t, d2) = lerp(self.E_XX,
-                                     T.dot(x.var, x.var.T) / k)
+                                     T.dot(x.var, x.var.T) / k,
+                                     en=self.en)
             E_XU_update = (self.E_XU, E_XU_new)
             E_XX_update = (self.E_XX, E_XX_new)
             b = 1.
@@ -183,10 +190,11 @@ class Model(object):
         return self.nonlin_est(fb)
 
     def feedback(self, id, parent=None):
-        return T.dot(self.phi, self.X[id].var)
+        x = T.dot(self.en, self.X[id].var)
+        return T.dot(self.phi, x)
 
     def feedforward(self, id):
-        return T.dot(self.phi.T, self.parent.X[id].var)
+        return T.dot(self.en, T.dot(self.phi.T, self.parent.X[id].var))
 
     def info(self, str):
         if DEBUG_INFO:
@@ -382,9 +390,12 @@ class ECA(object):
         Performs update round-trip from u to X and back.
         """
         # Create default state now when we know the sample count
-        if len(self.l_U.X) == 0:
+        if len(self.l_U.X) == 0 or self.l_U.X['training'].k != u.shape[1]:
             for l in self.layers:
                 l.create_state(u.shape[1], 'training')
+                if 'training' in l.model_update_f:
+                    del l.model_update_f['training']
+
 
         self.update_states('training', u, y)
         d = self.update_models('training', stiffness)
@@ -426,22 +437,23 @@ class ECA(object):
             print 'iters, delta %.4f' % max_delta,
             print 'Limits: i:', iter_limit, 't:', time_limit, 'd:', delta_limit
 
-    def converge(self, u, y, f, id):
+    def converge(self, id, u, y, f=None):
         k = u.shape[1]
         for l in self.layers:
             l.create_state(k, id)
         self.converge_state(id, u, y)
 
-        return f(id)
+        if f:
+            return f(id)
 
     def estimate_y(self, u, y, id):
-        return self.converge(u, y, self.yest, id)
+        return self.converge(id, u, y, self.yest)
 
     def estimate_u(self, u, y, id):
-        return self.converge(u, y, self.uest, id)
+        return self.converge(id, u, y, self.uest)
 
     def estimate_x(self, u, y, id):
-        return self.converge(u, y, self.xest, id)
+        return self.converge(id, u, y, self.xest)
 
     def xest(self, id='training', no_eval=False):
         """

@@ -287,9 +287,9 @@ class SupervisedLearningGUI(SupervisedLearning):
 
 class MultiModelLearning(UnsupervisedLearning):
     def configure(self):
-        self.layers = [600]
-        self.trn_iters = 410
-        self.stiff_start = 0.5
+        self.layers = [100]
+        self.trn_iters = 200
+        self.stiff_start = 0.05
         self.stiff_end = 0.005
         self.stiff_alpha = 0.95
         self.mdl = []
@@ -297,44 +297,40 @@ class MultiModelLearning(UnsupervisedLearning):
     def run(self):
         print 'Training...'
         try:
-            err_trn = []
-            err_val = []
-            self.mdl = None
-            for i in range(10):
+            self.mdl = ECA(self.layers, self.data.size('trn', 0)[0][0], 0,
+                           #T.tanh)
+                           #lambda x: x)
+                           rect)
+            n = self.layers[0]
+            u, y = self.get_data('trn')
+            for i in range(0, 10):
                 stiff = self.stiff_start
-                u, y = self.get_data('trn')
-                print 'Training model for class', i
-                if self.mdl:
-                    del self.mdl
-                self.mdl = ECA(self.layers, self.data.size('trn', 0)[0][0], 0,
-                               #T.tanh)
-                               #lambda x: x)
-                               rect)
-                # Show only samples belonging to a class
-                inp = u[:, y == i]
+                inp = u.copy()
+                inp = inp[:, y == i]
+                #inp = np.hstack((inp[:, y == i][:, :50], inp[:, y != i][:, :50*9]))
+                #inp[:, y != i] *= -0.5
+
+                en = np.array([0.] * (n // 10) * i + [1.] * (n // 10) + [0.0] * (9 - i) * (n // 10))
+                self.mdl.l_U.child.en.set_value(np.float32(np.diag(en)))
+
                 for iter in range(self.trn_iters):
                     self.run_iteration(iter, self.mdl, inp, None, stiff)
                     stiff = self.stiff_update(stiff)
 
-                print 'Calculating reconstruction errors...'
-                print 'Average error for training set',
-                print np.average(self.mdl.reconst_err_u(inp, None, 'training'))
-                print 'Average error other numbers',
-                print np.average(self.mdl.reconst_err_u(u[:, y != i], None, 'training'))
-                print 'Average error for validation',
-                uv, yv = self.get_data('val')
-                print np.average(self.mdl.reconst_err_u(uv[:, yv == i], None, 'training'))
-                uv, yv = self.get_data('val')
+            #self.visualize()
+            self.mdl.l_U.child.en.set_value(np.float32(np.diag([1.] * n)))
 
-                # TODO: correct labels to 'validation' etc. This is for memory saving reasons.
-                err_trn += [self.mdl.reconst_err_u(u, None, 'training')]
-                uv, yv = self.get_data('val')
-                err_val += [self.mdl.reconst_err_u(uv, None, 'training')]
-                assert not np.any(np.isnan(err_val))
-            # Estimate is the negative of the reconstruction error
-            trn_acc = self.accuracy(-np.array(err_trn), y)
-            val_acc = self.accuracy(-np.array(err_val), yv)
+            (trn_acc, val_acc) = self.calculate_accuracy()
+            print "Accuracy trn %6.2f %%, val %6.2f %%" % (100. * trn_acc,
+                                                           100. * val_acc)
 
+            for iter in range(self.trn_iters):
+                self.run_iteration(iter, self.mdl, u, None, stiff)
+                stiff = self.stiff_update(stiff)
+
+            #self.visualize()
+
+            (trn_acc, val_acc) = self.calculate_accuracy()
             print "Accuracy trn %6.2f %%, val %6.2f %%" % (100. * trn_acc,
                                                            100. * val_acc)
         except KeyboardInterrupt:
@@ -344,19 +340,31 @@ class MultiModelLearning(UnsupervisedLearning):
         assert type in ['tst', 'trn', 'val']
         return self.data.get(type, i=0, as_one_hot=False)
 
-    def calculate_accuracy(self):
-        # Training error
-        u, y = self.get_data('trn')
-        y_est = -np.array(r)
-        trn_acc = self.accuracy(y_est[:, :self.testset_size],
-                                y.T[:self.testset_size].T)
+    def visualize(self):
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        plt.imshow(rearrange_for_plot(self.mdl.first_phi()[:, :]), cmap=cm.Greys_r)
+        plt.show()
 
-        # Validation error
-        r = []
+    def calculate_accuracy(self):
+        n = self.layers[0]
+        u, y = self.get_data('trn')
+        x_en = np.square(self.mdl.estimate_x(u, None, 'training_err'))
+        scores = []
+        x_en /= np.mean(x_en, axis=1, keepdims=True)
         for i in range(10):
-            u_est = self.mdl[i].estimate_u(u, None, 'validation') * 2
-            reconst_mse = np.average(np.square(u_est - u), axis=0)
-            r += [reconst_mse]
+            en = np.mean(x_en[i * n//10:(i + 1) * n//10, :], axis=0)
+            scores += [en]
+        trn_acc = self.accuracy(np.array(scores), y)
+
+        uv, yv = self.get_data('val')
+        x_en = np.square(self.mdl.estimate_x(uv, None, 'validation'))
+        x_en /= np.mean(x_en, axis=1, keepdims=True)
+        scores = []
+        for i in range(10):
+            en = np.mean(x_en[i * n//10:(i + 1) * n//10, :], axis=0)
+            scores += [en]
+        val_acc = self.accuracy(np.array(scores), yv)
         return (trn_acc, val_acc)
 
 def main():

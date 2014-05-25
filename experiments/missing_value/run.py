@@ -124,7 +124,7 @@ def eca_missing_value_prediction(data, params):
             print "A: %5.2f %%" % (acc * 100.),
             print "U var: %.2f" % m.variance()[0][1],
             print "T: %4.1f" % tau,
-            print 'U MSE: %.5f' % np.average(np.square(x.T - m.l_U.X[0].var.get_value())),
+            print 'U MSE: %.5f' % np.average(np.square(x.T - m.uest())),
             print 'Took [s]: %.2f' % elapsed
             t = time.time()
 
