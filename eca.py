@@ -49,7 +49,7 @@ class Model(object):
         rng = np.random.RandomState(0)
         self.n = n
         self.m = m
-        self.en = theano.shared(np.identity(n, dtype=FLOATX), name='enabled')
+        self.modulation = None
         self.model_update_f = {}
         self.state_update_f = {}
         self.nonlin = nonlin
@@ -80,6 +80,8 @@ class Model(object):
         # Discard the last one
         del self.X[id]
         del self.state_update_f[id]
+        if id in self.model_update_f:
+            del self.model_update_f[id]
 
     def create_state(self, k, id):
         if id in self.X.keys():
@@ -96,12 +98,15 @@ class Model(object):
             assert x_prev.n == self.m, "Input dim mismatch"
             assert x.n == self.n, "Output dim mismatch"
             k = np.float32(x.k)
+            # Modulate x
+            if self.modulation is not None:
+                x_ = x.var * T.as_tensor_variable(self.modulation)
+            else:
+                x_ = x.var
             (E_XU_new, t, d1) = lerp(self.E_XU,
-                                     T.dot(x.var, x_prev.var.T) / k,
-                                     en=self.en)
+                                     T.dot(x_, x_prev.var.T) / k)
             (E_XX_new, t, d2) = lerp(self.E_XX,
-                                     T.dot(x.var, x.var.T) / k,
-                                     en=self.en)
+                                     T.dot(x_, x_.T) / k)
             E_XU_update = (self.E_XU, E_XU_new)
             E_XX_update = (self.E_XX, E_XX_new)
             b = 1.
@@ -190,11 +195,15 @@ class Model(object):
         return self.nonlin_est(fb)
 
     def feedback(self, id, parent=None):
-        x = T.dot(self.en, self.X[id].var)
-        return T.dot(self.phi, x)
+        return T.dot(self.phi, self.X[id].var)
 
     def feedforward(self, id):
-        return T.dot(self.en, T.dot(self.phi.T, self.parent.X[id].var))
+        return T.dot(self.phi.T, self.parent.X[id].var)
+
+    def set_modulation(self, mod):
+        # Should be set before first model updates
+        assert 'training' not in self.model_update_f
+        self.modulation = mod
 
     def info(self, str):
         if DEBUG_INFO:
@@ -244,6 +253,10 @@ class CollisionModel(Model):
         del self.X[id]
         del self.u_side.state_update_f[id]
         assert self.y_side.state_update_f == {}
+        if id in self.u_side.model_update_f:
+            del self.u_side.model_update_f[id]
+        if id in self.y_side.model_update_f:
+            del self.y_side.model_update_f[id]
 
     def create_state(self, k, id):
         if id in self.X.keys():
@@ -393,9 +406,6 @@ class ECA(object):
         if len(self.l_U.X) == 0 or self.l_U.X['training'].k != u.shape[1]:
             for l in self.layers:
                 l.create_state(u.shape[1], 'training')
-                if 'training' in l.model_update_f:
-                    del l.model_update_f['training']
-
 
         self.update_states('training', u, y)
         d = self.update_models('training', stiffness)
