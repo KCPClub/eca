@@ -23,9 +23,6 @@ def lerp(old, new, min_tau=0.0, en=None):
     return ((1 - lmbd) * old + lmbd * new,
             t, rel_diff)
 
-def free_mem():
-    from theano.sandbox.cuda import cuda_ndarray
-    return cuda_ndarray.cuda_ndarray.mem_info()[0] / 1024 / 1024
 
 class State(object):
     """ Object that represents any kind of state U, X, X_y, z, ...
