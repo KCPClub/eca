@@ -24,7 +24,7 @@ def lerp(old, new, min_tau=0.0, en=None):
             t, rel_diff)
 
 
-class State(object):
+class Signal(object):
     """ Object that represents any kind of state U, X, X_y, z, ...
     """
     def __init__(self, n, k):
@@ -40,7 +40,7 @@ class State(object):
         return np.average(np.square(self.var.get_value()), axis=1)
 
 
-class Model(object):
+class Layer(object):
     def __init__(self, name, n, parent, nonlin, identity=False):
         m = n if parent is None else parent.n
         rng = np.random.RandomState(0)
@@ -83,7 +83,7 @@ class Model(object):
     def create_state(self, k, id):
         if id in self.X.keys():
             self.delete_state(id)
-        self.X[id] = State(self.n, k)
+        self.X[id] = Signal(self.n, k)
 
     def update_model(self, id, stiffness):
         if id in self.model_update_f:
@@ -121,7 +121,7 @@ class Model(object):
                 outputs=d,
                 updates=[E_XU_update, E_XX_update, Q_update, phi_update])
 
-            self.info('Model update between ' + self.name + ' and ' + self.parent.name)
+            self.info('Layer update between ' + self.name + ' and ' + self.parent.name)
 
             #self.info('Updating model, avg(diag(E_XX))=%.2f, ' % np.average(d) +
                       #'avg phi col norm %.2f' % np.average(np.sqrt(np.sum(np.square(self.phi),
@@ -207,19 +207,19 @@ class Model(object):
             print '%5s:' % self.name, str
 
 
-class InputModel(Model):
+class InputLayer(Layer):
     def __init__(self, name, n):
-        super(InputModel, self).__init__(name,  n, None, None, True)
+        super(InputLayer, self).__init__(name,  n, None, None, True)
 
     def update_model(self, id, stiffness):
         return 0.0
 
 
-class CollisionModel(Model):
+class CollisionLayer(Layer):
     def __init__(self, name, n, (parent1, parent2), nonlin=None):
         relu = lambda x: T.where(x < 0, 0, x)
-        self.u_side = Model(name + 'u', n, parent1, lambda x: x)
-        self.y_side = Model(name + 'y', n, parent2, lambda x: x)
+        self.u_side = Layer(name + 'u', n, parent1, lambda x: x)
+        self.y_side = Layer(name + 'y', n, parent2, lambda x: x)
 
         # To make u and y update the same shared state, it must happen
         # simultaneously, so route u to ask y for its feedback as an estimate.
@@ -258,7 +258,7 @@ class CollisionModel(Model):
     def create_state(self, k, id):
         if id in self.X.keys():
             self.delete_state(id)
-        self.X[id] = State(self.n, k)
+        self.X[id] = Signal(self.n, k)
         self.u_side.X = self.X
         self.y_side.X = self.X
 
@@ -266,10 +266,10 @@ class CollisionModel(Model):
         assert False, "should not be called"
 
 
-class CCAModel(Model):
+class CCALayer(Layer):
     def __init__(self, name, (m, n)):
         self.E_ZZ = []
-        super(CCAModel, self).__init__(name, (m, n), nonlin=None,
+        super(CCALayer, self).__init__(name, (m, n), nonlin=None,
                                        identity=False)
         # Phi of this layer is not in use, mark it as nan
         self.phi = np.zeros((1, 1))
@@ -282,12 +282,12 @@ class CCAModel(Model):
 
     def create_state(self, k):
         # Create a stack of E_ZZ in addition to base class implementation
-        self.E_ZZ.append(State(1, 1))
-        return super(CCAModel, self).create_state(k)
+        self.E_ZZ.append(Signal(1, 1))
+        return super(CCALayer, self).create_state(k)
 
     def delete_state(self, id):
         del self.E_ZZ[id]
-        return super(CCAModel, self).delete_state(id)
+        return super(CCALayer, self).delete_state(id)
 
     def update_state(self, id, input, min_tau):
         z = self.X[id]
@@ -360,7 +360,7 @@ class ECA(object):
         print 'Creating', len(n_layers), 'layers with n in', n_layers
 
         # First the input layer U
-        self.l_U = InputModel('U', n_u)
+        self.l_U = InputLayer('U', n_u)
         self.layers = layers = [self.l_U]
         #self.l_U.nonlin_est = lambda x: T.eq(x, T.max(x, axis=0, keepdims=True))
         #self.l_U.nonlin_est = lambda x : T.nnet.sigmoid(x)
@@ -369,7 +369,7 @@ class ECA(object):
         # Then the consecutive layers U -> X_u1 -> X_u2 -> ...
         n_ulayers = n_layers[:-1] if n_y else n_layers
         for (i, n) in enumerate(n_ulayers):
-            m = Model("X_u%d" % (i + 1), n, layers[-1], nonlin)
+            m = Layer("X_u%d" % (i + 1), n, layers[-1], nonlin)
             layers.append(m)
 
         self.l_Y = None
@@ -383,7 +383,7 @@ class ECA(object):
         print 'Creating layer (%d) for classification' % n_y
 
         # First the input layer Y
-        self.l_Y = InputModel('Y', n_y)
+        self.l_Y = InputLayer('Y', n_y)
         layers += [self.l_Y]
         #self.l_Y.nonlin_est = lambda x: T.eq(x, T.max(x, axis=0, keepdims=True))
         #self.l_Y.nonlin_est = lambda x: T.nnet.softmax(x.T).T
@@ -392,7 +392,7 @@ class ECA(object):
         # ... -> X_uN -> Z
         # ... -> Y    --'
         print 'Creating collision layer with parents:', layers[-2].name, layers[-1].name
-        cl = CollisionModel('Z', n_layers[-1], (layers[-2], layers[-1]), nonlin)
+        cl = CollisionLayer('Z', n_layers[-1], (layers[-2], layers[-1]), nonlin)
         layers += [cl]
 
     def update(self, u, y, stiffness):
@@ -468,7 +468,7 @@ class ECA(object):
         before collision or CCA.
         """
         l = self.l_U
-        while l.child and not isinstance(l.child, CCAModel):
+        while l.child and not isinstance(l.child, CCALayer):
             l = l.child
         # Should this be Xbar or the feedforward ?
         v = l.X[id].var
