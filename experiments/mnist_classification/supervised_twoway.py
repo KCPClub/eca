@@ -15,8 +15,8 @@ def run(dry_run=False):
     stiff_update = lambda s: s * stiff_decay + (1 - stiff_decay) * stiff_end
     layers = [100] if not dry_run else [1]
     mdl = ECA(layers,
-              data.size('trn', 0)[0][0],
-              data.size('trn', 0)[1][0],
+              data.size('trn')[0][0],
+              data.size('trn')[1][0],
               rect)
     trn_iters = 500 if not dry_run else 1
 
@@ -25,14 +25,18 @@ def run(dry_run=False):
     stiff = stiff_start
     weights = []
     try:
+        trn_sig = mdl.new_signals(data.samples('trn'))
+        val_sig = mdl.new_signals(data.samples('val'))
+        tst_sig = mdl.new_signals(data.samples('tst'))
         for i in range(1, trn_iters + 1):
             t = time.time()
             # Update model
-            mdl.update(d.samples, d.labels, stiff)
+            trn_sig.propagate(d.samples, d.labels)
+            trn_sig.adapt_layers(stiff)
 
             stiff = stiff_update(stiff)
             if i % 200 == 0:
-                calculate_accuracy(mdl, data)
+                calculate_accuracy(trn_sig, val_sig, tst_sig, data)
 
             # Progress prints
             if (i % 20 == 0):
@@ -44,14 +48,14 @@ def run(dry_run=False):
 
                 tostr = lambda t: "{" + ", ".join(["%s: %6.2f" % (n, v) for (n, v) in t]) + "}"
 
-                var_str = " logvar:" + tostr(mdl.variance())
-                a_str   = " avg:   " + tostr(mdl.avg_levels())
+                var_str = " logvar:" + tostr(trn_sig.variance())
+                a_str   = " avg:   " + tostr(trn_sig.avg_levels())
                 phi_norms = mdl.phi_norms()
                 phi_larg_str = " |phinL|: " + tostr(map(lambda a: (a[0], np.sum(a[1] > 1.1)), phi_norms))
                 phi_ones_str = " |phin1|: " + tostr(map(lambda a: (a[0], np.sum(np.isclose(a[1], 1.0, atol=0.1))), phi_norms))
                 phi_zero_str = " |phin0|: " + tostr(map(lambda a: (a[0], np.sum(np.isclose(a[1], 0.0, atol=0.5))), phi_norms))
                 phi_str = " |phi|: " + tostr(map(lambda a: (a[0], np.average(a[1])), phi_norms))
-                E_str = " E: " + tostr(mdl.energy())
+                E_str = " E: " + tostr(trn_sig.energy())
 
                 print i_str, stiff_str, t_str, E_str, phi_ones_str, phi_zero_str, phi_larg_str
                 #print var_str, a_str, phi_str
@@ -64,20 +68,20 @@ def run(dry_run=False):
 
     try:
         print 'Calculating final accuracy'
-        calculate_accuracy(mdl, data)
+        calculate_accuracy(trn_sig, val_sig, tst_sig, data)
         if False:
             visualize(weights[0])
     except KeyboardInterrupt:
         pass
 
 
-def calculate_accuracy(mdl, data):
+def calculate_accuracy(trn_sig, val_sig, tst_sig, data):
     d = data.get('trn')
-    y_est = mdl.estimate_y(d.samples, np.float32(np.nan * d.labels), 'trn-err')
+    y_est = trn_sig.estimate_y(d.samples, np.float32(np.nan * d.labels))
     d.accuracy(y_est, print_it=True)
 
     d = data.get('val')
-    y_est = mdl.estimate_y(d.samples, np.float32(np.nan * d.labels), 'val-err')
+    y_est = val_sig.estimate_y(d.samples, np.float32(np.nan * d.labels))
     d.accuracy(y_est, print_it=True)
 
 

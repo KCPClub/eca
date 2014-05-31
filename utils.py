@@ -74,7 +74,6 @@ class MnistDataset(object):
                 print "Accuracy %s: %6.2f %%" % (self.type, 100. * acc)
             return acc
 
-
     def __init__(self, batch_size=500, testset_size=10000, normalize=True,
                  as_one_hot=False, stacked=False):
         # Download e.g. from http://deeplearning.net/data/mnist/mnist.pkl.gz
@@ -100,13 +99,20 @@ class MnistDataset(object):
                 x -= np.mean(x, axis=0, keepdims=True)
                 x /= np.maximum(np.std(x, axis=0, keepdims=True), 1e-10)
 
-    def size(self, type, i=None):
+    def size(self, type):
         assert type in self.data.keys(), 'type has to be in %s' % str(self.data.keys())
+        u_dim, y_dim = self.dims(type)
+        samples = self.samples(type)
+        return ((u_dim, samples), (y_dim, samples))
+
+    def samples(self, type):
+        return self.data[type][0][:self.batch_size].shape[0]
+
+    def dims(self, type):
         y_dim = 10 if self.as_one_hot else 1
         u_dim = self.data[type][0].shape[1]
         u_dim += y_dim if self.stacked else 0
-        batch_size = self.data[type][0].shape[0] if i is None else self.batch_size
-        return ((u_dim, batch_size), (y_dim, batch_size))
+        return (u_dim, y_dim)
 
     def get(self, type, i=None):
         """
