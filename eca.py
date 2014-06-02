@@ -4,6 +4,8 @@ import numpy as np
 import theano
 import theano.tensor as T
 DEBUG_INFO = False
+
+from utils import rect
 from theano.ifelse import ifelse
 PRINT_CONVERGENCE = False
 FLOATX = theano.config.floatX
@@ -30,12 +32,14 @@ def lerp(old, new, min_tau=0.0, en=None):
 class Signal(object):
     """ Object that represents any kind of state U, X, X_y, z, ...
     """
-    def __init__(self, n, k, name):
+    def __init__(self, n, k, name, next):
         rng = np.random.RandomState(0)
         self.var = theano.shared(np.float32(rng.uniform(size=(n, k))), name=name)
-        self.k = k
         self.n = n
+        self.k = k
+        self.name = name
         self.modulation = None
+        self.next = next
 
     def set_modulation(self, mod):
         assert self.modulation is None
@@ -48,69 +52,29 @@ class Signal(object):
         return np.average(np.square(self.var.get_value()), axis=1)
 
 
-class Layer(object):
-    def __init__(self, name, n, prev, nonlin, identity=False):
-        m = n if prev is None else prev.n
-        rng = np.random.RandomState(0)
+class LayerBase(object):
+    def __init__(self, name, n, prev):
         self.n = n
-        self.m = m
-        self.nonlin = nonlin
-        # Nonlinearity applied to the estimate coming from next layer
-        self.nonlin_est = lambda x: x
-        rand_init = np.float32(rng.uniform(size=(n, m)) - 0.5)
-        self.E_XU = theano.shared(rand_init, name='E_XU')
-        self.E_XX = theano.shared(np.identity(n, dtype=FLOATX), name='E_XX')
-        self.Q = theano.shared(np.identity(n, dtype=FLOATX), name='Q')
-        self.phi = theano.shared(rand_init.T, name='phi')
+        self.m = n if prev is None else prev.n
         self.name = name
         self.signal_key = name
-        self.missing_values = None
-        self.custom_state_op = None
+        # Nonlinearity applied to the estimate coming from next layer
+        self.nonlin_est = lambda x: x
+        self.nonlin = None
+        self.merge_op = None
+
         self.prev = prev
         self.next = None
-
         if self.prev:
             assert prev.next is None
             prev.next = self
 
-    def compile_adapt_f(self, signals):
-        x = self.signal(signals)
-        x_prev = self.prev.signal(signals)
-        assert x_prev.k == x.k, "Sample size mismatch"
-        assert x_prev.n == self.m, "Input dim mismatch"
-        assert x.n == self.n, "Output dim mismatch"
-        k = np.float32(x.k)
-        # Modulate x
-        if x.modulation is not None:
-            x_ = x.var * T.as_tensor_variable(x.modulation)
-        else:
-            x_ = x.var
-        (E_XU_new, t, d1) = lerp(self.E_XU,
-                                 T.dot(x_, x_prev.var.T) / k)
-        (E_XX_new, t, d2) = lerp(self.E_XX,
-                                 T.dot(x_, x_.T) / k)
-        E_XU_update = (self.E_XU, E_XU_new)
-        E_XX_update = (self.E_XX, E_XX_new)
-        b = 1.
-        d = T.diagonal(E_XX_new)
-        stiff = T.scalar('stiffnes', dtype=FLOATX)
-        Q_new = theano.sandbox.linalg.ops.diag(b / T.where(d < stiff, stiff, d))
-        Q_update = (self.Q, Q_new)
-
-        # TODO: optional spatial neighborhood coupling
-        phi_update = (self.phi, T.dot(Q_new, E_XU_new).T)
-
-        self.info('Compile layer update between: ' + self.name + ' and ' + self.prev.name)
-        d = T.maximum(T.max(d1), T.max(d2))
-        return theano.function(
-            inputs=[stiff],
-            outputs=d,
-            updates=[E_XU_update, E_XX_update, Q_update, phi_update])
-
     def signal(self, signals):
         key = self.signal_key
         if key not in signals.signal:
-            signals.signal[key] = Signal(self.n, signals.k, self.name)
+            next_sig = self.next.signal(signals) if self.next else None
+            s = Signal(self.n, signals.k, self.name, next_sig)
+            signals.signal[key] = s
         return signals.signal[key]
 
     def compile_prop_f(self, signals, has_input, min_tau=0.0):
@@ -131,8 +95,7 @@ class Layer(object):
             inputs += [input_t]
             nans = T.isnan(input_t)
             has_nans = T.any(nans)
-            input_t = T.where(T.isnan(input_t), 0.0, input_t)
-            feedforward = input_t
+            feedforward = T.where(nans, 0.0, input_t)
 
         self.info('Compiling propagation: %6s %4s %6s' %
                   (self.prev.name + ' ->' if self.prev else 'u/y ->',
@@ -143,8 +106,8 @@ class Layer(object):
         if self.nonlin:
             feedforward = self.nonlin(feedforward)
 
-        if self.custom_state_op:
-            new_value = self.custom_state_op(feedforward, estimate)
+        if self.merge_op:
+            new_value = self.merge_op(feedforward, estimate)
         else:
             new_value = feedforward - estimate
 
@@ -178,52 +141,113 @@ class Layer(object):
             print '%5s:' % self.name, str
 
 
-class InputLayer(Layer):
+class Layer(LayerBase):
+    def __init__(self, name, n, prev, nonlin, min_tau=0.0, stiffx=1.0):
+        super(Layer, self).__init__(name, n, prev)
+        n = self.n
+        m = self.m
+        rng = np.random.RandomState(0)
+        self.nonlin = nonlin
+        self.stiffx = stiffx
+        self.min_tau = min_tau
+
+        rand_init = np.float32(rng.uniform(size=(n, m)) - 0.5)
+        self.E_XU = theano.shared(rand_init, name='E_XU')
+        self.E_XX = theano.shared(np.identity(n, dtype=FLOATX), name='E_XX')
+        self.Q = theano.shared(np.identity(n, dtype=FLOATX), name='Q')
+        self.phi = theano.shared(rand_init.T, name='phi')
+
+    def compile_adapt_f(self, signals):
+        x = self.signal(signals)
+        x_prev = self.prev.signal(signals)
+        assert x_prev.k == x.k, "Sample size mismatch"
+        assert x_prev.n == self.m, "Input dim mismatch"
+        assert x.n == self.n, "Output dim mismatch"
+        k = np.float32(x.k)
+        # Modulate x
+        if x.modulation is not None:
+            x_ = x.var * T.as_tensor_variable(x.modulation)
+        else:
+            x_ = x.var
+        (E_XU_new, t, d1) = lerp(self.E_XU,
+                                 T.dot(x_, x_prev.var.T) / k,
+                                 self.min_tau)
+        (E_XX_new, t, d2) = lerp(self.E_XX,
+                                 T.dot(x_, x_.T) / k,
+                                 self.min_tau)
+        E_XU_update = (self.E_XU, E_XU_new)
+        E_XX_update = (self.E_XX, E_XX_new)
+        b = 1.
+        d = T.diagonal(E_XX_new)
+        stiff = T.scalar('stiffnes', dtype=FLOATX)
+        Q_new = theano.sandbox.linalg.ops.diag(b / T.where(d < stiff * self.stiffx,
+                                                           stiff * self.stiffx, d))
+        Q_update = (self.Q, Q_new)
+
+        # TODO: optional spatial neighborhood coupling
+        phi_update = (self.phi, T.dot(Q_new, E_XU_new).T)
+
+        self.info('Compile layer update between: ' + self.name + ' and ' + self.prev.name)
+        d = T.maximum(T.max(d1), T.max(d2))
+        return theano.function(
+            inputs=[stiff],
+            outputs=d,
+            updates=[E_XU_update, E_XX_update, Q_update, phi_update])
+
+    def __str__(self):
+        return "Layer %3s (%d) %.2f, %.2f, %s" % (self.name, self.n,
+                                                  self.stiffx,
+                                                  self.min_tau,
+                                                  self.nonlin)
+
+
+class Input(LayerBase):
     def __init__(self, name, n):
-        super(InputLayer, self).__init__(name,  n, None, None, True)
+        super(Input, self).__init__(name, n, None)
 
     def compile_adapt_f(self, signals):
         return lambda stiff: 0.0
 
+    def __str__(self):
+        return "Input %3s (%d)" % (self.name, self.n)
 
-class CollisionLayer(Layer):
-    def __init__(self, name, n, (prev1, prev2), nonlin=None):
-        self.u_side = Layer(name + 'u', n, prev1, lambda x: x)
-        self.y_side = Layer(name + 'y', n, prev2, lambda x: x)
+
+class RegressionLayer(LayerBase):
+    def __init__(self, name, n, (prev1, prev2), nonlin,
+                 min_tau=0.0, stiffx=1.0, merge_op=None):
+        super(RegressionLayer, self).__init__(name, n, None)
+
+        self.u_side = Layer(name + 'u', n, prev1, lambda x: x, 0.0)
+        self.y_side = Layer(name + 'y', n, prev2, lambda x: x, 0.0)
         self.u_side.signal_key = name
         self.y_side.signal_key = name
-        self.signal_key = name
-        self.name = name
-        self.merge_op = lambda fromu, fromy: nonlin(fromu + fromy)
-        # TODO: figure how to expose bot u_side and y_side phi
+        # TODO: figure out how to expose bot u_side and y_side phi
         self.phi = self.u_side.phi
 
         # To make u and y update the same shared state, it must happen
         # simultaneously, so route u to ask y for its feedback as an estimate.
         self.u_side.estimate = lambda i: self.y_side.feedforward(i)
-        self.u_side.custom_state_op = lambda fromu, fromy: nonlin(fromy + fromu)
-        #self.u_side.custom_state_op = lambda fromu, fromy: nonlin(fromu)
-        #self.u_side.custom_state_op = lambda fromu, fromy: (fromy + fromu)
-        #self.u_side.custom_state_op = lambda fromu, fromy: T.sqrt(fromu * fromy + 0.1)
+        #self.u_side.merge_op = lambda fromu, fromy: nonlin(fromy + fromu)
+        #self.u_side.merge_op = lambda fromu, fromy: nonlin(fromu)
+        self.u_side.merge_op = lambda fromu, fromy: nonlin(-fromy + fromu)
+        #self.u_side.merge_op = lambda fromu, fromy: T.sqrt(fromu * fromy + 0.1)
+        if merge_op:
+            self.u_side.merge_op = merge_op
 
         # Disable state updates on the y side so that X is updated only once
-        self.y_side.update_state = lambda i, input, min_tau: 0.0
-
-    def create_signal(self, signals):
-        return Signal(self, self.n, signals.k, self.name)
-
-    def update_state(self, id, input, min_tau):
-        assert False, 'should be never called'
+        self.y_side.compile_prop_f = lambda s, is_input: lambda min_tau: 0.0
 
     def compile_adapt_f(self, signals):
         assert False, "should not be called"
+
+    def __str__(self):
+        return super(RegressionLayer, self).__str__() + str(self.merge_op)
 
 
 class CCALayer(Layer):
     def __init__(self, name, (m, n)):
         self.E_ZZ = []
-        super(CCALayer, self).__init__(name, (m, n), nonlin=None,
-                                       identity=False)
+        super(CCALayer, self).__init__(name, (m, n), nonlin=None)
         # Phi of this layer is not in use, mark it as nan
         self.phi = np.zeros((1, 1))
 
@@ -295,46 +319,25 @@ class ECA(object):
           .
     """
 
-    def __init__(self, n_layers, n_u, n_y, nonlin=None):
-        # 1. Create layers for u branch
-        print 'Creating', len(n_layers), 'layers with n in', n_layers
-
-        # First the input layer U
-        self.U = InputLayer('U', n_u)
-        self.layers = layers = [self.U]
-        #self.U.nonlin_est = lambda x: T.eq(x, T.max(x, axis=0, keepdims=True))
-        #self.U.nonlin_est = lambda x : T.nnet.sigmoid(x)
-        #self.U.nonlin_est = nonlin
-
-        # Then the consecutive layers U -> X_u1 -> X_u2 -> ...
-        n_ulayers = n_layers[:-1] if n_y else n_layers
-        for (i, n) in enumerate(n_ulayers):
-            m = Layer("X_u%d" % (i + 1), n, layers[-1], nonlin)
-            layers.append(m)
-
+    def __init__(self):
+        self.U = None
         self.Y = None
-        self.collision = None
+        self.structure()
+        assert self.U is not None
+        # TODO: Add more checks for layer structure, e.g. avoid loops
+        for l in self.iter_layers():
+            print l
 
-        # No supervised y signal => all done!
-        if not n_y:
-            return
+    def structure(self):
+        raise NotImplemented
 
-        # 2. Create layers for y branch if still here
-        # Keep y branch shorter by only taking the last layer dimension
-        print 'Creating layer (%d) for classification' % n_y
-
-        # First the input layer Y
-        self.Y = InputLayer('Y', n_y)
-        layers += [self.Y]
-        #self.Y.nonlin_est = lambda x: T.eq(x, T.max(x, axis=0, keepdims=True))
-        #self.Y.nonlin_est = lambda x: T.nnet.softmax(x.T).T
-
-        # Then add connecting layer to connect u and y branches:
-        # ... -> X_uN -> Z
-        # ... -> Y    --'
-        print 'Creating collision layer with next:', layers[-2].name, layers[-1].name
-        cl = CollisionLayer('Z', n_layers[-1], (layers[-2], layers[-1]), nonlin)
-        layers += [cl]
+    def iter_layers(self, skip_inputs=False):
+        for l in [self.U, self.Y]:
+            if skip_inputs and l:
+                l = l.next
+            while l:
+                yield l
+                l = l.next
 
     def new_signals(self, k):
         return Signals(k, self)
@@ -345,7 +348,19 @@ class ECA(object):
 
     def phi_norms(self):
         f = lambda l: (l.name, (np.linalg.norm(l.phi.get_value(), axis=0)))
-        return map(f, list(set(self.layers) - set([self.U, self.Y])))
+        return map(f, self.iter_layers(skip_inputs=True))
+
+
+class SimpleECA(ECA):
+    """ Simplest possible one loop system """
+    def __init__(self, n_input, n_layer):
+        self.n_input = n_input
+        self.n_layer = n_layer
+        super(SimpleECA, self).__init__()
+
+    def structure(self):
+        self.U = Input('U', self.n_input)
+        self.X = Layer('X', self.n_layer, self.U, rect, 1.0)
 
 
 class Signals(object):
@@ -356,57 +371,37 @@ class Signals(object):
         self.propf = {}
         self.signal = {}
         self.name = None
+        print 'Creating signals with k =', k
 
-        for l in [self.mdl.U, self.mdl.Y]:
-            is_input = True
-            while l:
-                self.propf[l.name] = l.compile_prop_f(self, is_input)
-                is_input = False
-                l = l.next
-
-    def _iter_layers(self):
-        for l in [self.mdl.U, self.mdl.Y]:
-            while l:
-                yield l
-                l = l.next
-
-    def _compile_adapt_fs(self):
-        for l in self._iter_layers():
-            self.adaptf[l.name] = l.compile_adapt_f(self)
-
-        #for l in [self.mdl.U, self.mdl.Y]:
-            #while l:
-                #self.adaptf[l.name] = l.compile_adapt_f(self)
-                #l = l.next
+        for l in eca.iter_layers():
+            is_input = l is eca.U or l is eca.Y
+            self.propf[l.name] = l.compile_prop_f(self, is_input)
+        self.U = self.signal[eca.U.name]
+        self.Y = self.signal[eca.Y.name] if eca.Y else None
 
     def adapt_layers(self, stiffness):
+        # Compile adaptation functions lazily
         if self.adaptf == {}:
-            self._compile_adapt_fs()
+            for l in self.mdl.iter_layers():
+                self.adaptf[l.name] = l.compile_adapt_f(self)
 
-        for l in self._iter_layers():
+        for l in self.mdl.iter_layers():
             self.adaptf[l.name](stiffness)
-
-        #for l in [self.mdl.U, self.mdl.Y]:
-            #while l:
-                #self.adaptf[l.name](stiffness)
-                #l = l.next
 
     def propagate(self, u, y, min_tau=0.0):
         assert u is None or self.k == u.shape[1], "Sample size mismatch"
         assert y is None or self.k == y.shape[1], "Sample size mismatch"
         d = 0.0
-        for (l, inp) in zip([self.mdl.U, self.mdl.Y], [u, y]):
-            while l:
-                f = self.propf[l.name]
-                args = [min_tau] + ([] if inp is None else [inp])
-                d = max(d, f(*args))
-                l = l.next
-                inp = None
+        for l in self.mdl.iter_layers():
+            args = [min_tau]
+            args += [u] if l is self.mdl.U else []
+            args += [y] if l is self.mdl.Y else []
+            d = max(d, self.propf[l.name](*args))
         return d
 
-    def converge(self, u, y, min_tau=0.0, f=None):
+    def converge(self, u, y, min_tau=0.0, d_limit=1e-3):
         t = 20
-        (d_limit, t_limit, i_limit) = (1e-3, time() + t, 200)
+        t_limit, i_limit = time() + t, 200
         d, i, = np.inf, 0
         while d > d_limit and time() < t_limit and i < i_limit:
             d = self.propagate(u, y, min_tau)
@@ -415,18 +410,9 @@ class Signals(object):
             print 'Converged in', "%.1f" % (time() - t_limit + t), 's,',
             print i, 'iters, delta %.4f' % d,
             print 'Limits: i:', i_limit, 't:', t, 'd:', d_limit
-        return f() if f else None
+        return self
 
-    def estimate_y(self, u, y):
-        return self.converge(u, y, f=self.yest)
-
-    def estimate_u(self, u, y):
-        return self.converge(u, y, f=self.uest)
-
-    def estimate_x(self, u, y):
-        return self.converge(u, y, f=self.xest)
-
-    def xest(self, no_eval=False):
+    def x_est(self, no_eval=False):
         # TODO: Might not be reliable, fix.
         l = self.mdl.U
         while l.next and not isinstance(l.next, CCALayer):
@@ -435,35 +421,34 @@ class Signals(object):
         v = l.signal(self).var
         return v if no_eval else v.eval()
 
-    def uest(self, no_eval=False):
+    def u_est(self, no_eval=False):
         v = self.mdl.U.estimate(self)
         return v if no_eval else v.eval()
 
-    def yest(self, no_eval=False):
+    def y_est(self, no_eval=False):
         v = self.mdl.Y.estimate(self)
         return v if no_eval else v.eval()
 
-    def reconst_err_u(self, u, y):
-        u_est = self.estimate_u(u, y)
-        return np.average(np.square(u_est - u), axis=0)
+    def u_err(self, u):
+        return T.mean(T.sqr(self.u_est(no_eval=True) - u)).eval()
 
     def first_phi(self):
         # index is omitted for now, and the lowest layer is plotted
         return self.mdl.U.next.phi.get_value()
 
     def variance(self, states=None):
-        f = lambda l: (l.name, l.signal(self).variance())
-        return map(f, self.mdl.layers)
+        f = lambda s: (s.name, s.variance())
+        return map(f, self.signal.values())
 
     def energy(self):
-        f = lambda l: (l.name, np.average(l.signal(self).energy()))
-        return map(f, self.mdl.layers)
+        f = lambda s: (s.name, np.average(s.energy()))
+        return map(f, self.signal.values())
 
     def avg_levels(self):
-        f = lambda l: (l.name, np.linalg.norm(np.average(l.signal(self).var.get_value(), axis=1)))
-        return map(f, self.mdl.layers)
+        f = lambda s: (s.name, np.linalg.norm(np.average(s.var.get_value(), axis=1)))
+        return map(f, self.signal.values())
 
     def phi_norms(self):
         f = lambda l: (l.name, (np.linalg.norm(l.phi.get_value(), axis=0)))
-        return map(f, list(set(self.mdl.layers) - set([self.mdl.U, self.mdl.Y])))
+        return map(f, self.iter_layers(skip_inputs=True))
 

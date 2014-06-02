@@ -2,23 +2,30 @@
 import time
 import numpy as np
 
-from eca import ECA
+from eca import ECA, Input, Layer
 from utils import visualize, rect, MnistDataset
 
 
 def run(dry_run=False):
-    data = MnistDataset(batch_size=1000,
+    data = MnistDataset(batch_size=100,
                         testset_size=1000,
                         normalize=False)
-    stiff_start, stiff_end, stiff_decay = (0.5, 0.005, 0.99)
+    stiff_start, stiff_end, stiff_decay = (0.5, 0.005, 0.90)
     stiff_update = lambda s: s * stiff_decay + (1 - stiff_decay) * stiff_end
-    layers = [100] if not dry_run else [1]
-    mdl = ECA(layers,
-              data.size('trn')[0][0], 0,
-              rect)
-    trn_iters = 500 if not dry_run else 1
+    input_dim = data.size('trn')[0][0]
 
-    print 'Training...'
+    class Model(ECA):
+        def structure(self):
+            if dry_run:
+                self.U = Input('U', input_dim)
+                self.X = Layer('X', 3, self.U, rect, 1.0)
+            else:
+                self.U = Input('U', input_dim)
+                self.X = Layer('X1', 100, self.U, None, min_tau=0., stiffx=1.0)
+    mdl = Model()
+    trn_iters = 1000 if not dry_run else 1
+
+    print 'Training', trn_iters, 'iterations'
     d = data.get('trn')
     stiff = stiff_start
     weights = []
@@ -34,7 +41,8 @@ def run(dry_run=False):
 
             # Progress prints
             if (i % 20 == 0):
-                weights += [mdl.first_phi()[:-10, :]]
+                weights += [mdl.first_phi()[:, :]]
+                visualize(weights[-1])
                 i_str = "I %4d:" % (i)
                 t_str = 't: %.2f s' % (time.time() - t)
                 t = time.time()
@@ -50,8 +58,10 @@ def run(dry_run=False):
                 phi_zero_str = " |phin0|: " + tostr(map(lambda a: (a[0], np.sum(np.isclose(a[1], 0.0, atol=0.5))), phi_norms))
                 phi_str = " |phi|: " + tostr(map(lambda a: (a[0], np.average(a[1])), phi_norms))
                 E_str = " E: " + tostr(trn_sig.energy())
+                u_err = ' uerr: %.5f' % trn_sig.u_err(d.samples)
+                U_sqr = ' Usqr: %.5f' % np.average(np.square(trn_sig.U.var.get_value()))
 
-                print i_str, stiff_str, t_str, E_str, phi_ones_str, phi_zero_str, phi_larg_str
+                print i_str, stiff_str, t_str, E_str, phi_ones_str, u_err, U_sqr
                 #print var_str, a_str, phi_str
 
 

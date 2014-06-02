@@ -35,8 +35,11 @@ def rearrange_for_plot(w):
 
 
 def visualize(weights):
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+    except ImportError:
+        return
     animation = False
     if type(weights) is list and len(weights) > 1:
         fig = plt.figure()
@@ -62,6 +65,8 @@ class MnistDataset(object):
             self.samples = samples
             self.labels = labels
             self.type = type
+            self.k = samples.shape[1]
+            self.n = samples.shape[0]
 
         def accuracy(self, est, print_it=False):
             # If estimate is stacked, extract the labels
