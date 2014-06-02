@@ -3,10 +3,11 @@ from time import time
 import numpy as np
 import theano
 import theano.tensor as T
-DEBUG_INFO = False
+from theano.sandbox.linalg.ops import diag as theano_diag
 
 from utils import rect
 from theano.ifelse import ifelse
+DEBUG_INFO = False
 PRINT_CONVERGENCE = False
 FLOATX = theano.config.floatX
 
@@ -62,6 +63,9 @@ class LayerBase(object):
         self.nonlin_est = lambda x: x
         self.nonlin = None
         self.merge_op = None
+        self.enabled = theano.shared(1, name='enable')
+        self.enable = lambda: self.enabled.set_value(1)
+        self.disable = lambda: self.enabled.set_value(0)
 
         self.prev = prev
         self.next = None
@@ -117,10 +121,11 @@ class LayerBase(object):
 
         (new_X, t, d) = lerp(x.var, new_value, tau_in)
         d = T.max(d)
+        updates = [(x.var, ifelse(self.enabled, new_X, x.var))]
 
         return theano.function(inputs=inputs,
                                outputs=d,
-                               updates=[(x.var, new_X)])
+                               updates=updates)
 
     def estimate(self, signals):
         """ Ask the next for feedback and apply nonlinearity """
@@ -129,12 +134,12 @@ class LayerBase(object):
         return self.nonlin_est(self.next.feedback(signals))
 
     def feedback(self, signals):
-        x = self.signal(signals)
-        return T.dot(self.phi, x.var)
+        x = T.dot(self.phi, self.signal(signals).var)
+        return ifelse(self.enabled, x, T.zeros_like(x))
 
     def feedforward(self, signals):
-        x = self.prev.signal(signals)
-        return T.dot(self.phi.T, x.var)
+        x = T.dot(self.phi.T, self.prev.signal(signals).var)
+        return ifelse(self.enabled, x, T.zeros_like(x))
 
     def info(self, str):
         if DEBUG_INFO:
@@ -175,17 +180,18 @@ class Layer(LayerBase):
         (E_XX_new, t, d2) = lerp(self.E_XX,
                                  T.dot(x_, x_.T) / k,
                                  self.min_tau)
-        E_XU_update = (self.E_XU, E_XU_new)
-        E_XX_update = (self.E_XX, E_XX_new)
+        upd = lambda en, old, new: (old, ifelse(en, new, old))
+        E_XU_update = upd(self.enabled, self.E_XU, E_XU_new)
+        E_XX_update = upd(self.enabled, self.E_XX, E_XX_new)
         b = 1.
         d = T.diagonal(E_XX_new)
         stiff = T.scalar('stiffnes', dtype=FLOATX)
-        Q_new = theano.sandbox.linalg.ops.diag(b / T.where(d < stiff * self.stiffx,
-                                                           stiff * self.stiffx, d))
-        Q_update = (self.Q, Q_new)
+        Q_new = theano_diag(b / T.where(d < stiff * self.stiffx,
+                                        stiff * self.stiffx, d))
+        Q_update = upd(self.enabled, self.Q, Q_new)
 
         # TODO: optional spatial neighborhood coupling
-        phi_update = (self.phi, T.dot(Q_new, E_XU_new).T)
+        phi_update = upd(self.enabled, self.phi, T.dot(Q_new, E_XU_new).T)
 
         self.info('Compile layer update between: ' + self.name + ' and ' + self.prev.name)
         d = T.maximum(T.max(d1), T.max(d2))
