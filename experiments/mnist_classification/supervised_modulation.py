@@ -27,7 +27,7 @@ def run(dry_run=False):
 
     print 'Training', trn_iters, 'iterations'
     d = data.get('trn')
-    n = mdl.U.next.n
+    n = mdl.U.next[0].n
     weights = []
     try:
         trn_sig = mdl.new_signals(data.samples('trn'))
@@ -90,7 +90,7 @@ def run(dry_run=False):
 
 
 def calculate_accuracy(trn_sig, val_sig, tst_sig, data):
-    n = trn_sig.U.next.n
+    n = trn_sig.U.next[0].n
 
     def calculate(sigs, type):
         d = data.get(type)
