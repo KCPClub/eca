@@ -42,6 +42,9 @@ class Signal(object):
         self.modulation = None
         self.next = next
 
+    def val(self):
+        return self.var.get_value()
+
     def set_modulation(self, mod):
         assert self.modulation is None
         self.modulation = mod
@@ -56,7 +59,7 @@ class Signal(object):
 class LayerBase(object):
     def __init__(self, name, n, prev):
         self.n = n
-        self.m = n if prev is None else prev.n
+        self.m = n if prev is [] else [p.n for p in prev]
         self.name = name
         self.signal_key = name
         # Nonlinearity applied to the estimate coming from next layer
@@ -67,16 +70,20 @@ class LayerBase(object):
         self.enable = lambda: self.enabled.set_value(1)
         self.disable = lambda: self.enabled.set_value(0)
 
+        self.E_XU = []
+        self.phi = []
+
         self.prev = prev
-        self.next = None
-        if self.prev:
-            assert prev.next is None
-            prev.next = self
+        self.next = []
+        for p in self.prev:
+            assert self not in p.next
+            p.next += [self]
 
     def signal(self, signals):
         key = self.signal_key
         if key not in signals.signal:
-            next_sig = self.next.signal(signals) if self.next else None
+            # TODO: Might want to support several next signals
+            next_sig = self.next[0].signal(signals) if len(self.next) > 0 else None
             s = Signal(self.n, signals.k, self.name, next_sig)
             signals.signal[key] = s
         return signals.signal[key]
@@ -101,10 +108,10 @@ class LayerBase(object):
             has_nans = T.any(nans)
             feedforward = T.where(nans, 0.0, input_t)
 
-        self.info('Compiling propagation: %6s %4s %6s' %
-                  (self.prev.name + ' ->' if self.prev else 'u/y ->',
+        self.info('Compiling propagation: [%6s] -> %4s <- [%6s]' %
+                  (",".join([p.name for p in self.prev] if self.prev else 'u/y'),
                    self.name,
-                   '<- ' + self.next.name if self.next else ""))
+                   ",".join([p.name for p in self.next] if self.next else '')))
 
         # Apply nonlinearity to feedforward path only
         if self.nonlin:
@@ -129,16 +136,22 @@ class LayerBase(object):
 
     def estimate(self, signals):
         """ Ask the next for feedback and apply nonlinearity """
-        if not self.next:
+        if self.next == []:
             return 0.0
-        return self.nonlin_est(self.next.feedback(signals))
+        fb = [n.feedback(signals, self) for n in self.next]
+        return self.nonlin_est(T.sum(fb, axis=0))
 
-    def feedback(self, signals):
-        x = T.dot(self.phi, self.signal(signals).var)
+    def feedback(self, signals, to):
+        phi = self.phi[self.prev.index(to)]
+        x = T.dot(phi, self.signal(signals).var)
         return ifelse(self.enabled, x, T.zeros_like(x))
 
     def feedforward(self, signals):
-        x = T.dot(self.phi.T, self.prev.signal(signals).var)
+        xs = []
+        for i, p in enumerate(self.prev):
+            sig = p.signal(signals).var
+            xs += [T.dot(self.phi[i].T, sig)]
+        x = T.sum(xs, axis=0)
         return ifelse(self.enabled, x, T.zeros_like(x))
 
     def info(self, str):
@@ -148,57 +161,62 @@ class LayerBase(object):
 
 class Layer(LayerBase):
     def __init__(self, name, n, prev, nonlin, min_tau=0.0, stiffx=1.0):
+        assert prev is not None
+        if type(prev) is not list:
+            prev = [prev]
         super(Layer, self).__init__(name, n, prev)
         n = self.n
-        m = self.m
         rng = np.random.RandomState(0)
         self.nonlin = nonlin
         self.stiffx = stiffx
         self.min_tau = min_tau
 
-        rand_init = np.float32(rng.uniform(size=(n, m)) - 0.5)
-        self.E_XU = theano.shared(rand_init, name='E_XU')
-        self.E_XX = theano.shared(np.identity(n, dtype=FLOATX), name='E_XX')
-        self.Q = theano.shared(np.identity(n, dtype=FLOATX), name='Q')
-        self.phi = theano.shared(rand_init.T, name='phi')
+        for p in prev:
+            m = p.n
+            rand_init = np.float32(rng.uniform(size=(n, m)) - 0.5)
+            self.E_XU += [theano.shared(rand_init, name='E_' + name + p.name)]
+            self.phi += [theano.shared(rand_init.T, name='phi' + name)]
+        self.Q = theano.shared(np.identity(n, dtype=FLOATX), name='Q' + name)
+        self.E_XX = theano.shared(np.identity(n, dtype=FLOATX), name='E_' + name * 2)
 
     def compile_adapt_f(self, signals):
         x = self.signal(signals)
-        x_prev = self.prev.signal(signals)
-        assert x_prev.k == x.k, "Sample size mismatch"
-        assert x_prev.n == self.m, "Input dim mismatch"
-        assert x.n == self.n, "Output dim mismatch"
+        x_prev = [p.signal(signals) for p in self.prev]
+        assert np.all([x.k == xp.k for xp in x_prev])
+        assert self.m == [xp.n for xp in x_prev]
+        assert x.n == self.n
         k = np.float32(x.k)
         # Modulate x
         if x.modulation is not None:
             x_ = x.var * T.as_tensor_variable(x.modulation)
         else:
             x_ = x.var
-        (E_XU_new, t, d1) = lerp(self.E_XU,
-                                 T.dot(x_, x_prev.var.T) / k,
-                                 self.min_tau)
-        (E_XX_new, t, d2) = lerp(self.E_XX,
-                                 T.dot(x_, x_.T) / k,
-                                 self.min_tau)
-        upd = lambda en, old, new: (old, ifelse(en, new, old))
-        E_XU_update = upd(self.enabled, self.E_XU, E_XU_new)
-        E_XX_update = upd(self.enabled, self.E_XX, E_XX_new)
+
+        updates = []
+        upd = lambda en, old, new: [(old, ifelse(en, new, old))]
+
+        E_XX_new, _, d = lerp(self.E_XX, T.dot(x_, x_.T) / k, self.min_tau)
+        updates += upd(self.enabled, self.E_XX, E_XX_new)
         b = 1.
         d = T.diagonal(E_XX_new)
         stiff = T.scalar('stiffnes', dtype=FLOATX)
         Q_new = theano_diag(b / T.where(d < stiff * self.stiffx,
                                         stiff * self.stiffx, d))
-        Q_update = upd(self.enabled, self.Q, Q_new)
+        updates += upd(self.enabled, self.Q, Q_new)
 
-        # TODO: optional spatial neighborhood coupling
-        phi_update = upd(self.enabled, self.phi, T.dot(Q_new, E_XU_new).T)
+        for i, x_p in enumerate(x_prev):
+            E_XU_new, _, d_ = lerp(self.E_XU[i], T.dot(x_, x_p.var.T) / k,
+                                   self.min_tau)
+            updates += upd(self.enabled, self.E_XU[i], E_XU_new)
+            d = T.maximum(d, d_)
+            updates += upd(self.enabled, self.phi[i], T.dot(Q_new, E_XU_new).T)
 
-        self.info('Compile layer update between: ' + self.name + ' and ' + self.prev.name)
-        d = T.maximum(T.max(d1), T.max(d2))
+        self.info('Compile layer update between: ' + self.name + ' and '
+                  + ', '.join([p.name for p in self.prev]))
         return theano.function(
             inputs=[stiff],
             outputs=d,
-            updates=[E_XU_update, E_XX_update, Q_update, phi_update])
+            updates=updates)
 
     def __str__(self):
         return "Layer %3s (%d) %.2f, %.2f, %s" % (self.name, self.n,
@@ -209,7 +227,7 @@ class Layer(LayerBase):
 
 class Input(LayerBase):
     def __init__(self, name, n):
-        super(Input, self).__init__(name, n, None)
+        super(Input, self).__init__(name, n, [])
 
     def compile_adapt_f(self, signals):
         return lambda stiff: 0.0
@@ -219,12 +237,13 @@ class Input(LayerBase):
 
 
 class RegressionLayer(LayerBase):
-    def __init__(self, name, n, (prev1, prev2), nonlin,
+    def __init__(self, name, n, prev, nonlin,
                  min_tau=0.0, stiffx=1.0, merge_op=None):
         super(RegressionLayer, self).__init__(name, n, None)
+        assert len(prev) == 2
 
-        self.u_side = Layer(name + 'u', n, prev1, lambda x: x, 0.0)
-        self.y_side = Layer(name + 'y', n, prev2, lambda x: x, 0.0)
+        self.u_side = Layer(name + 'u', n, prev[0], lambda x: x, 0.0)
+        self.y_side = Layer(name + 'y', n, prev[1], lambda x: x, 0.0)
         self.u_side.signal_key = name
         self.y_side.signal_key = name
         # TODO: figure out how to expose bot u_side and y_side phi
@@ -338,22 +357,28 @@ class ECA(object):
         raise NotImplemented
 
     def iter_layers(self, skip_inputs=False):
-        for l in [self.U, self.Y]:
-            if skip_inputs and l:
-                l = l.next
-            while l:
-                yield l
-                l = l.next
+        def recurse(l):
+            if not l:
+                return
+            yield l
+            for n in l.next:
+                for x in recurse(n):
+                    yield x
+
+        s = set(list(recurse(self.U)) + list(recurse(self.Y)))
+        if skip_inputs:
+            s -= set([self.U, self.Y])
+        return s
 
     def new_signals(self, k):
         return Signals(k, self)
 
     def first_phi(self):
         # index is omitted for now, and the lowest layer is plotted
-        return self.U.next.phi.get_value()
+        return self.U.next[0].phi[0].get_value()
 
     def phi_norms(self):
-        f = lambda l: (l.name, (np.linalg.norm(l.phi.get_value(), axis=0)))
+        f = lambda l: (l.name, (np.linalg.norm(l.phi[0].get_value(), axis=0)))
         return map(f, self.iter_layers(skip_inputs=True))
 
 
@@ -440,7 +465,7 @@ class Signals(object):
 
     def first_phi(self):
         # index is omitted for now, and the lowest layer is plotted
-        return self.mdl.U.next.phi.get_value()
+        return self.mdl.U.next.phi[0].get_value()
 
     def variance(self, states=None):
         f = lambda s: (s.name, s.variance())
@@ -455,6 +480,6 @@ class Signals(object):
         return map(f, self.signal.values())
 
     def phi_norms(self):
-        f = lambda l: (l.name, (np.linalg.norm(l.phi.get_value(), axis=0)))
+        f = lambda l: (l.name, (np.linalg.norm(l.phi[0].get_value(), axis=0)))
         return map(f, self.iter_layers(skip_inputs=True))
 
