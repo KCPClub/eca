@@ -244,7 +244,7 @@ class Input(LayerBase):
 class RegressionLayer(LayerBase):
     def __init__(self, name, n, prev, nonlin,
                  min_tau=0.0, stiffx=1.0, merge_op=None):
-        super(RegressionLayer, self).__init__(name, n, None)
+        super(RegressionLayer, self).__init__(name, n, [])
         assert len(prev) == 2
 
         self.u_side = Layer(name + 'u', n, prev[0], lambda x: x, 0.0)
