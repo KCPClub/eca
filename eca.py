@@ -69,6 +69,7 @@ class LayerBase(object):
         self.enabled = theano.shared(1, name='enable')
         self.enable = lambda: self.enabled.set_value(1)
         self.disable = lambda: self.enabled.set_value(0)
+        self.persistent = False
 
         self.E_XU = []
         self.phi = []
@@ -118,7 +119,10 @@ class LayerBase(object):
             feedforward = self.nonlin(feedforward)
 
         if self.merge_op:
+            assert not self.persistent, 'cannot combine with merge_op'
             new_value = self.merge_op(feedforward, estimate)
+        elif self.persistent:
+            new_value = feedforward
         else:
             new_value = feedforward - estimate
 
@@ -226,8 +230,9 @@ class Layer(LayerBase):
 
 
 class Input(LayerBase):
-    def __init__(self, name, n):
+    def __init__(self, name, n, persistent=False):
         super(Input, self).__init__(name, n, [])
+        self.persistent = persistent
 
     def compile_adapt_f(self, signals):
         return lambda stiff: 0.0
