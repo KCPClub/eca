@@ -33,7 +33,7 @@ def lerp(old, new, min_tau=0.0, en=None):
 class Signal(object):
     """ Object that represents any kind of state U, X, X_y, z, ...
     """
-    def __init__(self, n, k, name, next):
+    def __init__(self, n, k, name, next, layer):
         rng = np.random.RandomState(0)
         self.var = theano.shared(np.float32(rng.uniform(size=(n, k))), name=name)
         self.n = n
@@ -41,6 +41,7 @@ class Signal(object):
         self.name = name
         self.modulation = None
         self.next = next
+        self.layer = layer
 
     def val(self):
         return self.var.get_value()
@@ -85,7 +86,7 @@ class LayerBase(object):
         if key not in signals.signal:
             # TODO: Might want to support several next signals
             next_sig = self.next[0].signal(signals) if len(self.next) > 0 else None
-            s = Signal(self.n, signals.k, self.name, next_sig)
+            s = Signal(self.n, signals.k, self.name, next_sig, self)
             signals.signal[key] = s
         return signals.signal[key]
 
