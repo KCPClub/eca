@@ -174,7 +174,7 @@ class Layer(LayerBase):
         rng = np.random.RandomState(0)
         self.nonlin = nonlin
         self.stiffx = stiffx
-        self.min_tau = min_tau
+        self.min_tau = theano.shared(np.float32(min_tau))
 
         for p in prev:
             m = p.n
@@ -226,7 +226,7 @@ class Layer(LayerBase):
     def __str__(self):
         return "Layer %3s (%d) %.2f, %.2f, %s" % (self.name, self.n,
                                                   self.stiffx,
-                                                  self.min_tau,
+                                                  self.min_tau.get_value(),
                                                   self.nonlin)
 
 
