@@ -89,7 +89,6 @@ def plot_Xdist(signal, axis=None):
     for row in s[:5]:
         p, x = np.histogram(row, bins=n, density=True)
         x = x[:-1] + (x[1] - x[0])/2   # convert bin edges to centers
-        #axis.plot(x, np.log(p))
         axis.plot(x, p)
     if show_it:
         axis.show()
@@ -157,7 +156,7 @@ def visualize(weights):
         imshowtiled(weights)
 
 
-class MnistDataset(object):
+class Dataset(object):
     """
     Class for handling training, validation, and test data
     """
@@ -182,24 +181,12 @@ class MnistDataset(object):
 
     def __init__(self, batch_size=500, testset_size=10000, normalize=True,
                  as_one_hot=False, stacked=False):
-        # Download e.g. from http://deeplearning.net/data/mnist/mnist.pkl.gz
-        filename = 'mnist.pkl.gz'
-        if not os.path.exists(filename):
-            raise Exception("Dataset not found, please run:\n  wget http://deeplearning.net/data/mnist/mnist.pkl.gz")
-
-        data = cPickle.load(gzip.open(filename))
         self.batch_size = batch_size
         self.testset_size = testset_size
         self.as_one_hot = as_one_hot
         self.stacked = stacked
         assert not stacked or as_one_hot, 'stacking requires one hot'
-        self.data = {
-            'trn': [np.float32(data[0][0]), np.int32(data[0][1])],
-            'val': [np.float32(data[1][0][:testset_size]),
-                    np.int32(data[1][1][:testset_size])],
-            'tst': [np.float32(data[2][0][:testset_size]),
-                    np.int32(data[2][1][:testset_size])]
-        }
+        self.load()
         if normalize:
             for x, y in self.data.values():
                 x -= np.mean(x, axis=0, keepdims=True)
@@ -253,8 +240,61 @@ class MnistDataset(object):
                 u = np.vstack([u, np.float32(np.nan * y_)])
         return MnistDataset.Data(u, y_, type)
 
+    def get_patches(self, w=8, m=10000, normalize_contrast=False):
+        patches = []
+        rng = np.random.RandomState(seed=0)
+        pix = self.data['trn'][0]
+        pix = pix.reshape((pix.shape[0],) + self.data_shape)
+        width, height, chans = self.data_shape
+        for i in xrange(m):
+            x, y = rng.randint(width - w), rng.randint(height - w)
+            j = rng.randint(len(pix))
+            patches += [pix[j, x:x+w, y:y+w, range(chans)].reshape(w * w * chans)]
+
+        patches = np.array(patches)
+        if normalize_contrast:
+            patches -= np.mean(patches, axis=1, keepdims=True)
+            patches /= np.maximum(np.std(patches, axis=1, keepdims=True), 1e-10)
+
+        return patches.T
+
+
+class MnistDataset(Dataset):
+    def load(self):
+        # Download e.g. from http://deeplearning.net/data/mnist/mnist.pkl.gz
+        filename = 'mnist.pkl.gz'
+        if not os.path.exists(filename):
+            raise Exception("Dataset not found, please run:\n  wget http://deeplearning.net/data/mnist/mnist.pkl.gz")
+
+        self.data_shape = (28, 28, 1)
+        data = cPickle.load(gzip.open(filename))
+        self.data = {
+            'trn': [np.float32(data[0][0]), np.int32(data[0][1])],
+            'val': [np.float32(data[1][0][:self.testset_size]),
+                    np.int32(data[1][1][:self.testset_size])],
+            'tst': [np.float32(data[2][0][:self.testset_size]),
+                    np.int32(data[2][1][:self.testset_size])]
+        }
+
+
+class Cifar10Dataset(Dataset):
+    def load(self):
+        from skdata.cifar10.dataset import CIFAR10
+        c = CIFAR10()
+        len(c.meta)
+        pix = np.float32(c._pixels / 255.)
+        self.data_shape = pix.shape[1:]
+        pix = pix.reshape(60000, np.prod(self.data_shape))
+        lbl = c._labels
+
+        assert self.testset_size <= 10000
+        t = self.testset_size
+        self.data = {
+            'trn': [pix[:40000], lbl[:40000]],
+            'val': [pix[40000:40000 + t], lbl[40000:40000 + t]],
+            'tst': [pix[50000:50000 + t], lbl[50000:50000 + t]]
+        }
 
 def free_mem():
     from theano.sandbox.cuda import cuda_ndarray
     return cuda_ndarray.cuda_ndarray.mem_info()[0] / 1024 / 1024
-
