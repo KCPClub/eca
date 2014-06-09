@@ -8,9 +8,9 @@ def test_loading():
     for Dataset in [MnistDataset, Cifar10Dataset]:
         d = Dataset(batch_size=400,
                     testset_size=1000)
-        p = d.get_patches(w=3, m=500, normalize_contrast=True)
-        assert p.shape[1] == 500
-        assert p.shape[0] == 3 * 3 * 3 or p.shape[0] == 3 * 3
+        p = d.get_patches(w=8, m=20, normalize_contrast=True)
+        assert p.shape[1] == 20
+        assert p.shape[0] == 8 * 8 * 3 or p.shape[0] == 8 * 8
         # Ensure all samples really are zero mean and 1 var
         assert np.allclose(np.mean(p, axis=0), 0.0, atol=1e-4)
         assert np.allclose(np.std(p, axis=0), 1.0, atol=1e-4)

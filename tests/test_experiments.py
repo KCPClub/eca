@@ -19,3 +19,13 @@ def test_supervised_modulation():
 def test_supervised_twoway():
     import experiments.mnist_classification.supervised_twoway as mdl
     mdl.run(dry_run=True)
+
+
+def test_unsupervised_conv_coates():
+    import experiments.coates_unsupervised as mdl
+    mdl.run(dry_run=True)
+
+
+def test_imputation():
+    import experiments.mnist_classification.imputation as mdl
+    mdl.run(dry_run=True)

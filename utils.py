@@ -58,7 +58,7 @@ def axis_and_show(axis):
             import matplotlib.pyplot as axis
         except ImportError:
             pass
-        return axis, True, axis.ylim
+        return axis, True, axis.ylim if axis else None
     return axis, False, axis.set_ylim
 
 
@@ -67,7 +67,6 @@ def imshowtiled(im, axis=None):
     if axis is None:
         return
     im = rearrange_for_plot(im)
-    print im.shape
     if im.ndim == 3:
         im = axis.imshow(im, interpolation='nearest')
     elif im.ndim == 2:
@@ -223,7 +222,7 @@ class Dataset(object):
         u = u[start:end].T
 
         if not self.as_one_hot:
-            return MnistDataset.Data(u, y[start:end].T, type)
+            return Dataset.Data(u, y[start:end].T, type)
 
         # Convert into one_hot presentation 2 -> [0, 0, 1, 0, ...]
         y_ = np.array(np.zeros(10))
@@ -249,7 +248,7 @@ class Dataset(object):
         for i in xrange(m):
             x, y = rng.randint(width - w), rng.randint(height - w)
             j = rng.randint(len(pix))
-            patches += [pix[j, x:x+w, y:y+w, range(chans)].reshape(w * w * chans)]
+            patches += [pix[j, x:x+w, y:y+w, :chans].reshape(w * w * chans)]
 
         patches = np.array(patches)
         if normalize_contrast:
@@ -284,6 +283,7 @@ class Cifar10Dataset(Dataset):
         len(c.meta)
         pix = np.float32(c._pixels / 255.)
         self.data_shape = pix.shape[1:]
+        assert self.data_shape == (32, 32, 3)
         pix = pix.reshape(60000, np.prod(self.data_shape))
         lbl = c._labels
 
