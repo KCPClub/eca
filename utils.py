@@ -11,27 +11,129 @@ rect = lambda x: T.where(x < 0., 0., x)
 def rearrange_for_plot(w):
     """
     Helper for tiling 1-dimensional square vectors into an array of images
+    Expecting w in form (n_pixels, n_images)
     """
+    assert w.ndim == 2
+    w = np.swapaxes(w, 0, 1)
+    n_images = w.shape[0]
     ratio = 4/3
-    image_dim = np.sqrt(w.shape[0])
-    if image_dim - np.floor(image_dim) > 0.001:
+    if np.sqrt(w.shape[1]) % 1.0 == 0:
+        chans = 1
+        image_dim = int(np.sqrt(w.shape[1]))
+    elif np.sqrt(w.shape[1] / 3.) % 1.0 == 0:
+        chans = 3
+        image_dim = int(np.sqrt(w.shape[1] / 3.))
+    else:
         print 'Chosen weights probably not representing a square image'
         return w
-    image_dim = int(image_dim)
-    n_images = w.shape[1]
     l = np.int(np.sqrt(n_images * ratio) + 0.5)
     full_rows = n_images / l
     last_row = n_images % l
 
-    w_ = w.T.reshape(n_images, image_dim, image_dim)
+    # Scale pixels to interval 0..1
+    w += np.abs(np.min(w))
+    w /= np.max(w)
+    w_ = np.ones((n_images, image_dim + 1, image_dim + 1, chans))
+    w_[:, 1:, 1:, :] = w.reshape(n_images, image_dim, image_dim, chans)
+    if chans == 1:
+        # Remove color channel if this is grayscale image
+        w_ = w_.reshape(w_.shape[:-1])
 
     rows = np.vstack([np.hstack(w_[l * i:l * (i + 1), :, :]) for i in
                       range(full_rows)])
     if last_row:
         r = np.hstack(w_[l * full_rows:, :, :])
-        r = np.hstack((r, np.zeros((r.shape[0], (l - last_row) * image_dim))))
+        ones = np.ones((r.shape[0], (l - last_row) * (image_dim + 1), chans))
+        if chans == 1:
+            ones = ones[:, :, 0]
+        r = np.hstack((r, ones))
         rows = np.vstack((rows, r))
     return rows
+
+
+def axis_and_show(axis):
+    """ Helper for hiding axis handling """
+    if axis is None:
+        try:
+            import matplotlib.pyplot as axis
+        except ImportError:
+            pass
+        return axis, True, axis.ylim
+    return axis, False, axis.set_ylim
+
+
+def imshowtiled(im, axis=None):
+    axis, show_it, _ = axis_and_show(axis)
+    if axis is None:
+        return
+    im = rearrange_for_plot(im)
+    print im.shape
+    if im.ndim == 3:
+        im = axis.imshow(im, interpolation='nearest')
+    elif im.ndim == 2:
+        import matplotlib.cm as cm
+        im = axis.imshow(im, cmap=cm.Greys_r, interpolation='nearest')
+    else:
+        pass
+    if show_it:
+        axis.show()
+    return im
+
+
+def plot_Xdist(signal, axis=None):
+    axis, show_it, _ = axis_and_show(axis)
+    if axis is None:
+        return
+    s = signal.val()
+    n = s.shape[1] / 10.
+    for row in s[:5]:
+        p, x = np.histogram(row, bins=n, density=True)
+        x = x[:-1] + (x[1] - x[0])/2   # convert bin edges to centers
+        #axis.plot(x, np.log(p))
+        axis.plot(x, p)
+    if show_it:
+        axis.show()
+
+
+def plot_qXphi(signal, n=int(1e5), axis=None):
+    axis, show_it, lim = axis_and_show(axis)
+    if axis is None:
+        return
+    en = np.mean(np.square(signal.val()), axis=1)
+    nphi = np.linalg.norm(signal.layer.phi[0].get_value(), axis=0)
+    Q = T.diagonal(signal.layer.Q).eval()
+    pen, = axis.plot(en[:n], 's-')
+    pphi, = axis.plot(nphi[:n], '*-')
+    pq, = axis.plot(Q[:n], 'x-')
+    axis.legend([pen, pphi, pq], ['E{X^2}', '|phi|', 'q_i'])
+    lim([0.0, 5])
+    if show_it:
+        axis.show()
+
+
+def plot_svds(*args, **kwargs):
+    axis = kwargs['axis'] if 'axis' in kwargs else None
+    axis, show_it, _ = axis_and_show(axis)
+    if axis is None:
+        return
+    n = kwargs['n'] if 'n' in kwargs else int(1e9)
+    plots = []
+    names = []
+    svd = lambda x: np.linalg.svd(x, compute_uv=False) / np.sqrt(x.shape[1])
+    for s in args:
+        try:
+            val = s.val()
+        except:
+            val = s
+        plots.append(axis.plot(svd(val)[:n])[-1])
+        try:
+            name = s.name
+        except:
+            name = '?'
+        names.append('svd(' + name + ')')
+    axis.legend(plots, names)
+    if show_it:
+        axis.show()
 
 
 def visualize(weights):
@@ -44,7 +146,7 @@ def visualize(weights):
     if type(weights) is list and len(weights) > 1:
         fig = plt.figure()
         ax = fig.add_subplot(1, 1, 1)
-        ims = [[ax.imshow(rearrange_for_plot(w), cmap=cm.Greys_r)] for w in weight_seq]
+        ims = [[imshowtiled(w, axis=ax)] for w in weight_seq]
         import matplotlib.animation as animation
         ani = animation.ArtistAnimation(fig, ims, interval=100, repeat_delay=1000)
         #writer = animation.writers['ffmpeg'](fps=20,bitrate=1000)
@@ -52,8 +154,7 @@ def visualize(weights):
         plt.show()
     else:
         weights = weights[0] if type(weights) is list else weights
-        plt.imshow(rearrange_for_plot(weights), cmap=cm.Greys_r)
-        plt.show()
+        imshowtiled(weights)
 
 
 class MnistDataset(object):
